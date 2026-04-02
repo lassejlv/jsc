@@ -411,7 +411,15 @@ impl CodeGen {
             format!("{}", JS_UNDEF)
         };
         if self.is_main {
+            self.emit("  call void @js_run_event_loop()");
             self.emit("  ret i32 0");
+        } else if self.is_async {
+            let wrapped = self.fresh_reg();
+            self.emit(&format!(
+                "  {} = call i64 @js_async_return(i64 {})",
+                wrapped, val
+            ));
+            self.emit(&format!("  ret i64 {}", wrapped));
         } else {
             self.emit(&format!("  ret i64 {}", val));
         }

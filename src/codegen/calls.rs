@@ -92,6 +92,31 @@ impl CodeGen {
                     return self.emit_math_call(method, &expr.arguments);
                 }
 
+                // Promise static methods
+                if obj_name == "Promise" {
+                    let func = match method {
+                        "resolve" => "js_promise_resolve_static",
+                        "reject" => "js_promise_reject_static",
+                        "all" => "js_promise_all",
+                        "race" => "js_promise_race",
+                        "allSettled" => "js_promise_all_settled",
+                        _ => "",
+                    };
+                    if !func.is_empty() {
+                        let arg = if expr.arguments.is_empty() {
+                            format!("{}", JS_UNDEF)
+                        } else {
+                            self.emit_call_arg(&expr.arguments[0])
+                        };
+                        let r = self.fresh_reg();
+                        self.emit(&format!(
+                            "  {} = call i64 @{}(i64 {})",
+                            r, func, arg
+                        ));
+                        return Some(r);
+                    }
+                }
+
                 // Date.now()
                 if obj_name == "Date" && method == "now" {
                     let r = self.fresh_reg();
@@ -217,6 +242,38 @@ impl CodeGen {
         if let Expression::Identifier(id) = &expr.callee {
             let name = id.name.as_str();
             match name {
+                "setTimeout" | "setInterval" => {
+                    let callback = if expr.arguments.is_empty() {
+                        format!("{}", JS_UNDEF)
+                    } else {
+                        self.emit_call_arg(&expr.arguments[0])
+                    };
+                    let delay = if expr.arguments.len() >= 2 {
+                        self.emit_call_arg(&expr.arguments[1])
+                    } else {
+                        format!("{}", super::js_number_bits(0.0))
+                    };
+                    let func = if name == "setTimeout" { "js_set_timeout" } else { "js_set_interval" };
+                    let r = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @{}(i64 {}, i64 {})",
+                        r, func, callback, delay
+                    ));
+                    return Some(r);
+                }
+                "clearTimeout" | "clearInterval" => {
+                    let id = if expr.arguments.is_empty() {
+                        format!("{}", JS_UNDEF)
+                    } else {
+                        self.emit_call_arg(&expr.arguments[0])
+                    };
+                    let r = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_clear_timeout(i64 {})",
+                        r, id
+                    ));
+                    return Some(r);
+                }
                 "fetch" => {
                     let url = if expr.arguments.is_empty() {
                         format!("{}", JS_UNDEF)

@@ -17,6 +17,7 @@ const RUNTIME_SRC: &str = concat!(
     include_str!("../runtime/js_json.c"),
     include_str!("../runtime/js_operators.c"),
     include_str!("../runtime/js_fetch.c"),
+    include_str!("../runtime/js_promise.c"),
     include_str!("../runtime/js_init.c"),
 );
 const VERSION: &str = env!("CARGO_PKG_VERSION");

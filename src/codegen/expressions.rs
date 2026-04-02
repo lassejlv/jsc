@@ -40,11 +40,11 @@ impl CodeGen {
             Expression::StaticMemberExpression(sme) => self.emit_static_member(sme),
             Expression::ComputedMemberExpression(cme) => self.emit_computed_member(cme),
             Expression::ArrowFunctionExpression(af) => {
-                self.emit_arrow_fn(&af.params, af.body.as_ref(), af.expression)
+                self.emit_arrow_fn(&af.params, af.body.as_ref(), af.expression, af.r#async)
             }
             Expression::FunctionExpression(fe) => {
                 if let Some(body) = &fe.body {
-                    self.emit_arrow_fn(&fe.params, body, false)
+                    self.emit_arrow_fn(&fe.params, body, false, fe.r#async)
                 } else {
                     format!("{}", JS_UNDEF)
                 }
@@ -63,6 +63,12 @@ impl CodeGen {
                 last
             }
             Expression::ChainExpression(ce) => self.emit_chain(&ce.expression),
+            Expression::AwaitExpression(ae) => {
+                let val = self.emit_expression(&ae.argument);
+                let reg = self.fresh_reg();
+                self.emit(&format!("  {} = call i64 @js_await(i64 {})", reg, val));
+                reg
+            }
             _ => format!("{}", JS_UNDEF),
         }
     }
@@ -466,26 +472,42 @@ impl CodeGen {
 
     pub(crate) fn emit_new(&mut self, ne: &NewExpression<'_>) -> String {
         if let Expression::Identifier(id) = &ne.callee {
-            if id.name.as_str() == "Error" {
-                let obj = self.fresh_reg();
-                self.emit(&format!("  {} = call i64 @js_object_new()", obj));
-                let key = self.emit_string_const("name");
-                let name_val = self.emit_string_const("Error");
-                self.emit(&format!(
-                    "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
-                    obj, key, name_val
-                ));
-                let msg_key = self.emit_string_const("message");
-                let msg_val = if ne.arguments.is_empty() {
-                    self.emit_string_const("")
-                } else {
-                    self.emit_call_arg(&ne.arguments[0])
-                };
-                self.emit(&format!(
-                    "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
-                    obj, msg_key, msg_val
-                ));
-                return obj;
+            match id.name.as_str() {
+                "Error" => {
+                    let obj = self.fresh_reg();
+                    self.emit(&format!("  {} = call i64 @js_object_new()", obj));
+                    let key = self.emit_string_const("name");
+                    let name_val = self.emit_string_const("Error");
+                    self.emit(&format!(
+                        "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                        obj, key, name_val
+                    ));
+                    let msg_key = self.emit_string_const("message");
+                    let msg_val = if ne.arguments.is_empty() {
+                        self.emit_string_const("")
+                    } else {
+                        self.emit_call_arg(&ne.arguments[0])
+                    };
+                    self.emit(&format!(
+                        "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                        obj, msg_key, msg_val
+                    ));
+                    return obj;
+                }
+                "Promise" => {
+                    let executor = if ne.arguments.is_empty() {
+                        format!("{}", JS_UNDEF)
+                    } else {
+                        self.emit_call_arg(&ne.arguments[0])
+                    };
+                    let reg = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_promise_create(i64 {})",
+                        reg, executor
+                    ));
+                    return reg;
+                }
+                _ => {}
             }
         }
         format!("{}", JS_UNDEF)
@@ -525,11 +547,11 @@ impl CodeGen {
             Argument::StaticMemberExpression(sme) => self.emit_static_member(sme),
             Argument::ComputedMemberExpression(cme) => self.emit_computed_member(cme),
             Argument::ArrowFunctionExpression(af) => {
-                self.emit_arrow_fn(&af.params, af.body.as_ref(), af.expression)
+                self.emit_arrow_fn(&af.params, af.body.as_ref(), af.expression, af.r#async)
             }
             Argument::FunctionExpression(fe) => {
                 if let Some(body) = &fe.body {
-                    self.emit_arrow_fn(&fe.params, body, false)
+                    self.emit_arrow_fn(&fe.params, body, false, fe.r#async)
                 } else {
                     format!("{}", JS_UNDEF)
                 }

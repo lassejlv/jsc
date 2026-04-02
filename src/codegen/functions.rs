@@ -22,6 +22,7 @@ impl CodeGen {
         self.block_terminated = false;
         self.current_block = "entry".to_string();
         self.is_main = false;
+        self.is_async = func.r#async;
 
         // Collect params — use simple names for identifiers, synthetic names for destructured
         let mut param_ir_names = Vec::new();
@@ -84,7 +85,16 @@ impl CodeGen {
         }
 
         if !self.block_terminated {
-            self.emit(&format!("  ret i64 {}", JS_UNDEF));
+            if self.is_async {
+                let wrapped = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = call i64 @js_async_return(i64 {})",
+                    wrapped, JS_UNDEF
+                ));
+                self.emit(&format!("  ret i64 {}", wrapped));
+            } else {
+                self.emit(&format!("  ret i64 {}", JS_UNDEF));
+            }
         }
         self.emit("}");
         self.functions.push(std::mem::take(&mut self.current_fn));
@@ -95,6 +105,7 @@ impl CodeGen {
         self.block_terminated = saved_terminated;
         self.current_block = saved_block;
         self.is_main = saved_is_main;
+        self.is_async = false;
     }
 
     /// Emit an arrow function / function expression as a separate LLVM function.
@@ -105,6 +116,7 @@ impl CodeGen {
         params: &FormalParameters<'_>,
         body: &FunctionBody<'_>,
         is_expression: bool,
+        is_async_fn: bool,
     ) -> String {
         let fn_name = format!("__jsfn_anon_{}", self.next_anon_fn);
         self.next_anon_fn += 1;
@@ -127,6 +139,7 @@ impl CodeGen {
         self.block_terminated = false;
         self.current_block = "entry".to_string();
         self.is_main = false;
+        self.is_async = is_async_fn;
 
         // Collect simple param names (for closure shadowing check)
         let mut simple_param_names: Vec<String> = Vec::new();
@@ -198,7 +211,16 @@ impl CodeGen {
             if let Some(Statement::ExpressionStatement(es)) = body.statements.first() {
                 let val = self.emit_expression(&es.expression);
                 if !self.block_terminated {
-                    self.emit(&format!("  ret i64 {}", val));
+                    if is_async_fn {
+                        let wrapped = self.fresh_reg();
+                        self.emit(&format!(
+                            "  {} = call i64 @js_async_return(i64 {})",
+                            wrapped, val
+                        ));
+                        self.emit(&format!("  ret i64 {}", wrapped));
+                    } else {
+                        self.emit(&format!("  ret i64 {}", val));
+                    }
                     self.block_terminated = true;
                 }
             }
@@ -212,7 +234,16 @@ impl CodeGen {
         }
 
         if !self.block_terminated {
-            self.emit(&format!("  ret i64 {}", JS_UNDEF));
+            if is_async_fn {
+                let wrapped = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = call i64 @js_async_return(i64 {})",
+                    wrapped, JS_UNDEF
+                ));
+                self.emit(&format!("  ret i64 {}", wrapped));
+            } else {
+                self.emit(&format!("  ret i64 {}", JS_UNDEF));
+            }
         }
         self.emit("}");
         self.functions.push(std::mem::take(&mut self.current_fn));
@@ -223,6 +254,7 @@ impl CodeGen {
         self.block_terminated = saved_terminated;
         self.current_block = saved_block;
         self.is_main = saved_is_main;
+        self.is_async = false;
 
         // Allocate and populate closure environment in the OUTER function
         let env_size = outer_vars.len();

@@ -18,6 +18,7 @@
 #include <windows.h>
 #else
 #include <sys/time.h>
+#include <unistd.h>
 #define _strdup strdup
 #endif
 
@@ -37,6 +38,22 @@ JSValue js_array_sort(JSValue arr_val, JSValue compare_fn);
 JSValue js_array_splice(JSValue arr_val, JSValue* args, int argc);
 JSValue js_json_parse(JSValue str);
 JSValue js_fetch(JSValue url_val, JSValue options_val);
+// Promise
+JSValue js_promise_create(JSValue executor);
+JSValue js_promise_resolve_static(JSValue value);
+JSValue js_promise_reject_static(JSValue reason);
+JSValue js_promise_all(JSValue arr_val);
+JSValue js_promise_race(JSValue arr_val);
+JSValue js_promise_all_settled(JSValue arr_val);
+JSValue js_await(JSValue value);
+JSValue js_async_return(JSValue value);
+JSValue js_async_throw(JSValue error);
+JSValue js_promise_then(JSValue promise, JSValue on_fulfilled, JSValue on_rejected);
+// Timers
+JSValue js_set_timeout(JSValue callback, JSValue delay_val);
+JSValue js_set_interval(JSValue callback, JSValue delay_val);
+JSValue js_clear_timeout(JSValue id_val);
+void js_run_event_loop(void);
 
 #define QNAN        ((uint64_t)0x7FFC000000000000ULL)
 #define SIGN_BIT    ((uint64_t)0x8000000000000000ULL)

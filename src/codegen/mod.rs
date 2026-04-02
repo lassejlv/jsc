@@ -40,6 +40,7 @@ pub struct CodeGen {
     pub(crate) current_block: String,
     pub(crate) is_main: bool,
     pub(crate) loop_stack: Vec<(String, String)>, // (break_label, continue_label)
+    pub(crate) is_async: bool,
 }
 
 impl CodeGen {
@@ -59,6 +60,7 @@ impl CodeGen {
             current_block: "entry".to_string(),
             is_main: false,
             loop_stack: Vec::new(),
+            is_async: false,
         }
     }
 
@@ -230,6 +232,7 @@ impl CodeGen {
 
     fn end_main(&mut self) {
         if !self.block_terminated {
+            self.emit("  call void @js_run_event_loop()");
             self.emit("  ret i32 0");
         }
         self.emit("}");
@@ -350,6 +353,21 @@ impl CodeGen {
             "declare i64 @js_array_from(i64)",
             // fetch
             "declare i64 @js_fetch(i64, i64)",
+            // promises
+            "declare i64 @js_promise_create(i64)",
+            "declare i64 @js_promise_resolve_static(i64)",
+            "declare i64 @js_promise_reject_static(i64)",
+            "declare i64 @js_promise_all(i64)",
+            "declare i64 @js_promise_race(i64)",
+            "declare i64 @js_promise_all_settled(i64)",
+            "declare i64 @js_await(i64)",
+            "declare i64 @js_async_return(i64)",
+            "declare i64 @js_async_throw(i64)",
+            // timers
+            "declare i64 @js_set_timeout(i64, i64)",
+            "declare i64 @js_set_interval(i64, i64)",
+            "declare i64 @js_clear_timeout(i64)",
+            "declare void @js_run_event_loop()",
         ];
         for d in &decls {
             writeln!(out, "{}", d).unwrap();

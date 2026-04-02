@@ -378,6 +378,26 @@ JSValue js_call_method(JSValue this_val, const char* method, JSValue* args, int 
             if (!js_is_undefined(body)) return js_json_parse(body);
         }
 
+        // Promise methods: .then(), .catch(), .finally()
+        {
+            JSValue __type = js_object_get(obj, "__type");
+            if (js_is_string(__type) && strcmp(js_as_string(__type)->data, "Promise") == 0) {
+                if (strcmp(method, "then") == 0) {
+                    JSValue on_fulfilled = (argc > 0) ? args[0] : JS_UNDEFINED;
+                    JSValue on_rejected = (argc > 1) ? args[1] : JS_UNDEFINED;
+                    return js_promise_then(this_val, on_fulfilled, on_rejected);
+                }
+                if (strcmp(method, "catch") == 0) {
+                    JSValue on_rejected = (argc > 0) ? args[0] : JS_UNDEFINED;
+                    return js_promise_then(this_val, JS_UNDEFINED, on_rejected);
+                }
+                if (strcmp(method, "finally") == 0) {
+                    JSValue on_finally = (argc > 0) ? args[0] : JS_UNDEFINED;
+                    return js_promise_then(this_val, on_finally, on_finally);
+                }
+            }
+        }
+
         // Headers API: .get(key), .has(key), .forEach(fn)
         if (strcmp(method, "get") == 0 && argc > 0) {
             char* key = js_to_cstring(args[0]);

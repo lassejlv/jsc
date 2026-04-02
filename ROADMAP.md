@@ -1,8 +1,8 @@
 # Roadmap: Toward a Working JS Compiler
 
-Current state: compiles JavaScript to native executables via LLVM IR. Phases 1–7 (sync) are complete. Comprehensive language support including: NaN-boxed dynamic types, strings (27+ methods), objects, arrays (20+ methods including sort/splice), closures, `this` binding, try/catch/finally, destructuring, spread, JSON.parse/stringify, all synchronous builtins, switch/do-while/for-in, break/continue, compound assignments (`+=` etc), bitwise operators, optional chaining (`?.`), nullish coalescing (`??`), `delete`, `in`, `void`, and more. Cross-platform (macOS, Linux, Windows).
+Current state: compiles JavaScript to native executables via LLVM IR. Phases 1–8 are complete. Comprehensive language support including: NaN-boxed dynamic types, strings (27+ methods), objects, arrays (25+ methods), closures, `this` binding, try/catch/finally, destructuring, spread, JSON.parse/stringify, all synchronous builtins, switch/do-while/for-in, break/continue, compound assignments, bitwise operators, optional chaining (`?.`), nullish coalescing (`??`), Promises, async/await, setTimeout/setInterval, event loop, and fetch() with full HTTP support. Cross-platform (macOS, Linux, Windows).
 
-Remaining work: async/await, modules, classes, and polish.
+Remaining work: modules, classes, and polish.
 
 ---
 
@@ -26,7 +26,7 @@ Remaining work: async/await, modules, classes, and polish.
 
 - [x] **Reference counting** — `JSString` has refcount, freed when count hits 0
 - [ ] **Cycle-safe GC** — Mark-and-sweep garbage collector (for circular references)
-- [x] **Runtime allocator** — C runtime library (`runtime.c`) linked into every compiled program, uses malloc/free
+- [x] **Runtime allocator** — C runtime library linked into every compiled program, uses malloc/free
 
 ## Phase 4: Objects and Arrays ✅
 
@@ -61,9 +61,9 @@ Remaining work: async/await, modules, classes, and polish.
 - [x] **Error objects** — `new Error("message")` with `.message` and `.name`
 - [ ] **Stack traces** — `.stack` property on Error objects
 
-## Phase 7: Built-in Functions and I/O Runtime
+## Phase 7: Built-in Functions and I/O Runtime ✅
 
-### Synchronous built-ins ✅
+### Synchronous built-ins
 - [x] **prompt(message)** — Read line from stdin
 - [x] **parseInt() / parseFloat()** — String to number conversion
 - [x] **Math object** — `Math.floor`, `Math.ceil`, `Math.round`, `Math.random`, `Math.sqrt`, `Math.pow`, `Math.abs`, `Math.min`, `Math.max`, `Math.PI`, `Math.E`, `Math.LN2`, `Math.LN10`, `Math.SQRT2`, `Math.LOG2E`, `Math.LOG10E`, `Math.sin`, `Math.cos`, `Math.tan`, `Math.atan2`, `Math.exp`, `Math.trunc`, `Math.sign`, `Math.log`, `Math.log2`, `Math.log10`
@@ -72,9 +72,10 @@ Remaining work: async/await, modules, classes, and polish.
 - [x] **console.error()** — Print to stderr
 - [x] **Date.now()** — Millisecond timestamp
 
-### Async built-ins (requires Phase 8 first)
-- [ ] **setTimeout / setInterval** — Timer-based callbacks
-- [ ] **fetch()** — HTTP requests (link to libcurl or a Rust HTTP client compiled as a static lib)
+### Async built-ins
+- [x] **setTimeout / setInterval** — Timer-based callbacks with event loop
+- [x] **clearTimeout / clearInterval** — Cancel scheduled timers
+- [x] **fetch()** — Full HTTP client via libcurl (GET/POST/PUT/DELETE/PATCH/HEAD, headers, body, redirect control, timeout, response.json()/text()/headers.get())
 
 ## Phase 7.5: Operators and Control Flow ✅
 
@@ -94,14 +95,14 @@ Remaining work: async/await, modules, classes, and polish.
 - [x] **Sequence expression** — Comma operator `(a, b, c)`
 - [x] **Labeled statements** — Basic support
 
-## Phase 8: Async / Await
+## Phase 8: Async / Await ✅
 
-Required for `fetch()` and modern JS patterns. This is the hardest phase.
-
-- [ ] **Promises** — Basic Promise implementation with `.then()`, `.catch()`
-- [ ] **async functions** — Compile to state machines (like Rust's async or C# coroutines)
-- [ ] **await expressions** — Suspend and resume execution
-- [ ] **Event loop** — A minimal event loop runtime for scheduling async work and timers
+- [x] **Promises** — Full implementation: `new Promise(executor)`, `.then()`, `.catch()`, `.finally()` with chaining and error propagation
+- [x] **Promise static methods** — `Promise.resolve()`, `Promise.reject()`, `Promise.all()`, `Promise.race()`, `Promise.allSettled()`
+- [x] **async functions** — `async function`, `async` arrow functions, `async` function expressions — return values wrapped in Promise
+- [x] **await expressions** — `await` unwraps Promises (throws on rejection), passes through non-Promises
+- [x] **Top-level await** — Works at module/script level
+- [x] **Event loop** — Timer-based event loop runs after main code, processes timers in correct time order, exits when no active timers remain
 
 ## Phase 9: Module System
 
@@ -132,23 +133,25 @@ Required for `fetch()` and modern JS patterns. This is the hardest phase.
 
 The big remaining items are:
 1. **Classes** (Phase 10) — Very common in modern JS, needed for most frameworks
-2. **Async/await** (Phase 8) — Hardest phase, needed for I/O-heavy code
-3. **Modules** (Phase 9) — Multi-file programs with import/export
-4. **Test suite / benchmarks** (Phase 11) — Automated testing and performance comparison
+2. **Modules** (Phase 9) — Multi-file programs with import/export
+3. **Test suite / benchmarks** (Phase 11) — Automated testing and performance comparison
 
 ## Architecture note: the runtime library
 
-The runtime library (`runtime/runtime.c`, ~1,600 lines of C) is already in place and provides:
+The runtime is split into 11 modular C files (~2,200 lines total) under `runtime/`, concatenated at compile time:
 
-- NaN-boxed value representation and type operations
-- Reference-counted string allocation
-- Object hash map implementation (FNV-1a hashing, linear probing, property deletion with tombstones)
-- Dynamic arrays with 25+ methods (including sort, splice, fill)
-- Closure/function value support with this-binding stack
-- Error handling via setjmp/longjmp
-- Bitwise operators with proper int32 conversion
-- JSON parser and stringifier
-- All synchronous built-in functions (Math, console, Date, JSON, Object, Array, etc.)
-- Cross-platform support (Windows via `_strdup`/`GetSystemTimeAsFileTime`, POSIX via `strdup`/`gettimeofday`)
+| File | Purpose |
+|------|---------|
+| `js_types.c` | NaN-boxing, type definitions, forward declarations |
+| `js_strings.c` | String alloc, concat, compare |
+| `js_objects.c` | Objects (hash map) and arrays |
+| `js_core.c` | Type coercion, errors, arithmetic, comparisons, property access |
+| `js_methods.c` | Method dispatch (string/array/object/Promise methods) |
+| `js_builtins.c` | prompt, Math, parseInt, Date.now, etc. |
+| `js_json.c` | JSON.stringify and JSON.parse |
+| `js_operators.c` | Bitwise, spread, this, in/delete, sort/splice |
+| `js_fetch.c` | HTTP client via libcurl |
+| `js_promise.c` | Promises, async/await, setTimeout/setInterval, event loop |
+| `js_init.c` | Runtime initialization |
 
 This is compiled alongside the generated LLVM IR by clang into the final native executable.
