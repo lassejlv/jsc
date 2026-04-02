@@ -25,6 +25,12 @@ pub(crate) fn js_number_bits(v: f64) -> i64 {
     i64::from_ne_bytes(v.to_ne_bytes())
 }
 
+/// Module info for multi-file compilation
+pub struct ModuleInfo {
+    pub id: usize,
+    pub path: String,
+}
+
 pub struct CodeGen {
     pub(crate) functions: Vec<String>,
     pub(crate) current_fn: String,
@@ -41,6 +47,11 @@ pub struct CodeGen {
     pub(crate) is_main: bool,
     pub(crate) loop_stack: Vec<(String, String)>, // (break_label, continue_label)
     pub(crate) is_async: bool,
+    // Module system
+    pub(crate) modules: Vec<ModuleInfo>,                        // registered modules
+    pub(crate) module_map: HashMap<String, usize>,              // path -> module id
+    pub(crate) current_module_id: Option<usize>,                // current module being compiled
+    pub(crate) module_globals: Vec<String>,                     // LLVM globals for modules
 }
 
 impl CodeGen {
@@ -61,13 +72,45 @@ impl CodeGen {
             is_main: false,
             loop_stack: Vec::new(),
             is_async: false,
+            modules: Vec::new(),
+            module_map: HashMap::new(),
+            current_module_id: None,
+            module_globals: Vec::new(),
         }
     }
 
     pub fn compile(program: &Program<'_>) -> String {
+        Self::compile_with_modules(program, &[])
+    }
+
+    /// Compile with module support. `modules` is a list of (path, program) for imported modules.
+    pub fn compile_with_modules(
+        program: &Program<'_>,
+        modules: &[(String, &Program<'_>)],
+    ) -> String {
         let mut cg = Self::new();
 
-        // First pass: emit function declarations
+        // Register modules
+        for (i, (path, _)) in modules.iter().enumerate() {
+            cg.modules.push(ModuleInfo { id: i, path: path.clone() });
+            cg.module_map.insert(path.clone(), i);
+            // Emit module globals
+            cg.module_globals.push(format!(
+                "@__mod_{}_exports = global i64 0",
+                i
+            ));
+            cg.module_globals.push(format!(
+                "@__mod_{}_initialized = global i32 0",
+                i
+            ));
+        }
+
+        // Compile each module as an init function
+        for (i, (_, mod_program)) in modules.iter().enumerate() {
+            cg.emit_module_init(i, mod_program);
+        }
+
+        // First pass on main: emit function declarations
         for stmt in &program.body {
             if let Statement::FunctionDeclaration(func) = stmt {
                 cg.emit_function_decl(func);
@@ -83,6 +126,84 @@ impl CodeGen {
         }
         cg.end_main();
         cg.finalize()
+    }
+
+    /// Emit a module's init function
+    fn emit_module_init(&mut self, mod_id: usize, program: &Program<'_>) {
+        let saved_fn = std::mem::take(&mut self.current_fn);
+        let saved_scopes = std::mem::take(&mut self.scopes);
+        let saved_terminated = self.block_terminated;
+        let saved_block = std::mem::take(&mut self.current_block);
+        let saved_is_main = self.is_main;
+        let saved_module_id = self.current_module_id;
+
+        self.scopes = vec![HashMap::new()];
+        self.block_terminated = false;
+        self.current_block = "entry".to_string();
+        self.is_main = false;
+        self.current_module_id = Some(mod_id);
+
+        let init_fn = format!("__mod_{}_init", mod_id);
+
+        self.emit(&format!("define void @{}() {{", init_fn));
+        self.emit("entry:");
+
+        // Check if already initialized
+        let flag = self.fresh_reg();
+        self.emit(&format!(
+            "  {} = load i32, ptr @__mod_{}_initialized",
+            flag, mod_id
+        ));
+        let done = self.fresh_reg();
+        self.emit(&format!("  {} = icmp ne i32 {}, 0", done, flag));
+        let init_label = self.fresh_label("mod.init");
+        let done_label = self.fresh_label("mod.done");
+        self.emit_cond_br(&done, &done_label, &init_label);
+
+        self.emit_label(&init_label);
+        self.emit(&format!(
+            "  store i32 1, ptr @__mod_{}_initialized",
+            mod_id
+        ));
+
+        // Create exports object
+        let exports = self.fresh_reg();
+        self.emit(&format!("  {} = call i64 @js_object_new()", exports));
+        self.emit(&format!(
+            "  store i64 {}, ptr @__mod_{}_exports",
+            exports, mod_id
+        ));
+
+        // First pass: function declarations
+        for stmt in &program.body {
+            if let Statement::FunctionDeclaration(func) = stmt {
+                self.emit_function_decl(func);
+            }
+        }
+
+        // Second pass: module body (handles exports)
+        for stmt in &program.body {
+            if self.block_terminated {
+                break;
+            }
+            if !matches!(stmt, Statement::FunctionDeclaration(_)) {
+                self.emit_statement(stmt);
+            }
+        }
+
+        self.emit_br(&done_label);
+        self.emit_label(&done_label);
+        self.emit("  ret void");
+        self.emit("}");
+        self.functions.push(std::mem::take(&mut self.current_fn));
+
+        // Restore state
+        self.current_fn = saved_fn;
+        self.scopes = saved_scopes;
+        self.block_terminated = saved_terminated;
+        self.current_block = saved_block;
+        self.is_main = saved_is_main;
+        self.current_module_id = saved_module_id;
     }
 
     // ---- Helpers ----
@@ -373,6 +494,14 @@ impl CodeGen {
             writeln!(out, "{}", d).unwrap();
         }
         writeln!(out).unwrap();
+
+        // Module globals
+        for global in &self.module_globals {
+            writeln!(out, "{}", global).unwrap();
+        }
+        if !self.module_globals.is_empty() {
+            writeln!(out).unwrap();
+        }
 
         // String constants
         for (name, escaped, len) in &self.string_constants {

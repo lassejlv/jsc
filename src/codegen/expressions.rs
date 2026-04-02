@@ -63,6 +63,12 @@ impl CodeGen {
                 last
             }
             Expression::ChainExpression(ce) => self.emit_chain(&ce.expression),
+            // TypeScript: strip type assertions, just emit the inner expression
+            Expression::TSAsExpression(e) => self.emit_expression(&e.expression),
+            Expression::TSSatisfiesExpression(e) => self.emit_expression(&e.expression),
+            Expression::TSNonNullExpression(e) => self.emit_expression(&e.expression),
+            Expression::TSInstantiationExpression(e) => self.emit_expression(&e.expression),
+            Expression::TSTypeAssertion(e) => self.emit_expression(&e.expression),
             Expression::AwaitExpression(ae) => {
                 let val = self.emit_expression(&ae.argument);
                 let reg = self.fresh_reg();

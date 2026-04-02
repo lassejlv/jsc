@@ -46,6 +46,22 @@ impl CodeGen {
             Statement::LabeledStatement(s) => {
                 self.emit_statement(&s.body);
             }
+            Statement::ImportDeclaration(decl) => self.emit_import(decl),
+            Statement::ExportNamedDeclaration(decl) => self.emit_export_named(decl),
+            Statement::ExportDefaultDeclaration(decl) => self.emit_export_default(decl),
+            Statement::ExportAllDeclaration(_) => {
+                // TODO: export * from "..."
+            }
+            // TypeScript: skip type-only declarations
+            Statement::TSTypeAliasDeclaration(_) => {}
+            Statement::TSInterfaceDeclaration(_) => {}
+            Statement::TSModuleDeclaration(_) => {}
+            Statement::TSGlobalDeclaration(_) => {}
+            Statement::TSImportEqualsDeclaration(_) => {}
+            Statement::TSExportAssignment(_) => {}
+            Statement::TSNamespaceExportDeclaration(_) => {}
+            // TypeScript: compile enums to objects
+            Statement::TSEnumDeclaration(e) => self.emit_ts_enum(e),
             _ => {
                 // Unsupported statement — skip
             }
@@ -703,5 +719,354 @@ impl CodeGen {
 
         self.emit_label(&end_label);
         self.pop_scope();
+    }
+
+    // ---- TypeScript: enums ----
+
+    fn emit_ts_enum(&mut self, decl: &TSEnumDeclaration<'_>) {
+        let enum_name = decl.id.name.as_str();
+
+        // Create an object for the enum
+        let obj = self.fresh_reg();
+        self.emit(&format!("  {} = call i64 @js_object_new()", obj));
+
+        let mut next_value: i64 = 0;
+
+        for member in &decl.body.members {
+            let member_name = match &member.id {
+                TSEnumMemberName::Identifier(id) => id.name.as_str().to_string(),
+                TSEnumMemberName::String(s) => s.value.as_str().to_string(),
+                _ => continue,
+            };
+
+            let val = if let Some(init) = &member.initializer {
+                // Explicit initializer
+                let v = self.emit_expression(init);
+                // Try to track numeric value for auto-increment
+                if let Expression::NumericLiteral(lit) = init {
+                    next_value = lit.value as i64 + 1;
+                }
+                v
+            } else {
+                // Auto-increment numeric value
+                let v = format!("{}", super::js_number_bits(next_value as f64));
+                next_value += 1;
+                v
+            };
+
+            // Forward mapping: Name -> Value
+            let key = self.emit_string_const(&member_name);
+            self.emit(&format!(
+                "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                obj, key, val
+            ));
+
+            // Reverse mapping: Value -> Name (for numeric enums)
+            let val_as_key = self.fresh_reg();
+            self.emit(&format!(
+                "  {} = call i64 @js_to_string_val(i64 {})",
+                val_as_key, val
+            ));
+            let name_val = self.emit_string_const(&member_name);
+            self.emit(&format!(
+                "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                obj, val_as_key, name_val
+            ));
+        }
+
+        // Store the enum object as a variable
+        let alloca = self.declare_var(enum_name);
+        self.emit(&format!(
+            "  store i64 {}, ptr {}, align 8",
+            obj, alloca
+        ));
+
+        // If in a module, also export it
+        if let Some(mod_id) = self.current_module_id {
+            let exports = self.fresh_reg();
+            self.emit(&format!(
+                "  {} = load i64, ptr @__mod_{}_exports",
+                exports, mod_id
+            ));
+            let export_key = self.emit_string_const(enum_name);
+            self.emit(&format!(
+                "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                exports, export_key, obj
+            ));
+        }
+    }
+
+    // ---- Module: import/export ----
+
+    fn emit_import(&mut self, decl: &ImportDeclaration<'_>) {
+        let source = decl.source.value.as_str();
+
+        // Look up module ID
+        let mod_id = match self.module_map.get(source) {
+            Some(&id) => id,
+            None => {
+                // Try with .js extension
+                let with_ext = format!("{}.js", source);
+                match self.module_map.get(&with_ext) {
+                    Some(&id) => id,
+                    None => {
+                        // Try matching by filename
+                        let mut found = None;
+                        for (path, &id) in &self.module_map {
+                            if path.ends_with(source) || path.ends_with(&format!("{}.js", source)) {
+                                found = Some(id);
+                                break;
+                            }
+                        }
+                        match found {
+                            Some(id) => id,
+                            None => return, // Module not found, skip
+                        }
+                    }
+                }
+            }
+        };
+
+        // Call module init
+        self.emit(&format!("  call void @__mod_{}_init()", mod_id));
+
+        // Load exports object
+        let exports = self.fresh_reg();
+        self.emit(&format!(
+            "  {} = load i64, ptr @__mod_{}_exports",
+            exports, mod_id
+        ));
+
+        // Bind imported names
+        if let Some(specifiers) = &decl.specifiers {
+            for spec in specifiers {
+                match spec {
+                    ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                        // import { foo } from "..." or import { foo as bar } from "..."
+                        let imported_name = match &s.imported {
+                            ModuleExportName::IdentifierName(id) => id.name.as_str(),
+                            ModuleExportName::IdentifierReference(id) => id.name.as_str(),
+                            ModuleExportName::StringLiteral(sl) => sl.value.as_str(),
+                        };
+                        let local_name = s.local.name.as_str();
+                        let key = self.emit_string_const(imported_name);
+                        let val = self.fresh_reg();
+                        self.emit(&format!(
+                            "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
+                            val, exports, key
+                        ));
+                        let alloca = self.declare_var(local_name);
+                        self.emit(&format!(
+                            "  store i64 {}, ptr {}, align 8",
+                            val, alloca
+                        ));
+                    }
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                        // import foo from "..."
+                        let local_name = s.local.name.as_str();
+                        let key = self.emit_string_const("default");
+                        let val = self.fresh_reg();
+                        self.emit(&format!(
+                            "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
+                            val, exports, key
+                        ));
+                        let alloca = self.declare_var(local_name);
+                        self.emit(&format!(
+                            "  store i64 {}, ptr {}, align 8",
+                            val, alloca
+                        ));
+                    }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
+                        // import * as ns from "..."
+                        let local_name = s.local.name.as_str();
+                        let alloca = self.declare_var(local_name);
+                        self.emit(&format!(
+                            "  store i64 {}, ptr {}, align 8",
+                            exports, alloca
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    fn emit_export_named(&mut self, decl: &ExportNamedDeclaration<'_>) {
+        let mod_id = match self.current_module_id {
+            Some(id) => id,
+            None => return, // Not in a module, skip
+        };
+
+        // export const x = 5; / export function foo() {}
+        if let Some(declaration) = &decl.declaration {
+            match declaration {
+                Declaration::VariableDeclaration(vd) => {
+                    // Emit the variable declaration normally
+                    self.emit_var_decl(vd);
+                    // Then store each declared name in exports
+                    let exports = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = load i64, ptr @__mod_{}_exports",
+                        exports, mod_id
+                    ));
+                    for declarator in &vd.declarations {
+                        if let BindingPattern::BindingIdentifier(id) = &declarator.id {
+                            let name = id.name.as_str();
+                            let alloca = self.lookup_var(name).to_string();
+                            let val = self.fresh_reg();
+                            self.emit(&format!(
+                                "  {} = load i64, ptr {}, align 8",
+                                val, alloca
+                            ));
+                            let key = self.emit_string_const(name);
+                            self.emit(&format!(
+                                "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                                exports, key, val
+                            ));
+                        }
+                    }
+                }
+                Declaration::FunctionDeclaration(func) => {
+                    self.emit_function_decl(func);
+                    if let Some(id) = &func.id {
+                        let name = id.name.as_str();
+                        if let Some(llvm_name) = self.known_functions.get(name).cloned() {
+                            let arity = func.params.items.len();
+                            // Emit a trampoline: indirect convention -> direct convention
+                            let tramp_name = format!("{}_tramp", llvm_name);
+                            let mut tramp = String::new();
+                            use std::fmt::Write;
+                            writeln!(tramp, "define i64 @{}(ptr %args, i32 %argc, ptr %closure) {{", tramp_name).unwrap();
+                            writeln!(tramp, "entry:").unwrap();
+                            let mut param_regs = Vec::new();
+                            for i in 0..arity {
+                                writeln!(tramp, "  %p{} = getelementptr i64, ptr %args, i32 {}", i, i).unwrap();
+                                writeln!(tramp, "  %a{} = load i64, ptr %p{}, align 8", i, i).unwrap();
+                                param_regs.push(format!("i64 %a{}", i));
+                            }
+                            writeln!(tramp, "  %r = call i64 @{}({})", llvm_name, param_regs.join(", ")).unwrap();
+                            writeln!(tramp, "  ret i64 %r").unwrap();
+                            writeln!(tramp, "}}").unwrap();
+                            self.functions.push(tramp);
+
+                            let exports = self.fresh_reg();
+                            self.emit(&format!(
+                                "  {} = load i64, ptr @__mod_{}_exports",
+                                exports, mod_id
+                            ));
+                            let fval = self.fresh_reg();
+                            self.emit(&format!(
+                                "  {} = call i64 @js_func_new(ptr @{}, ptr null, i32 {})",
+                                fval, tramp_name, arity
+                            ));
+                            let key = self.emit_string_const(name);
+                            self.emit(&format!(
+                                "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                                exports, key, fval
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // export { x, y }
+        if !decl.specifiers.is_empty() && decl.source.is_none() {
+            let exports = self.fresh_reg();
+            self.emit(&format!(
+                "  {} = load i64, ptr @__mod_{}_exports",
+                exports, mod_id
+            ));
+            for spec in &decl.specifiers {
+                let local_name = match &spec.local {
+                    ModuleExportName::IdentifierName(id) => id.name.as_str(),
+                    ModuleExportName::IdentifierReference(id) => id.name.as_str(),
+                    ModuleExportName::StringLiteral(sl) => sl.value.as_str(),
+                };
+                let exported_name = match &spec.exported {
+                    ModuleExportName::IdentifierName(id) => id.name.as_str(),
+                    ModuleExportName::IdentifierReference(id) => id.name.as_str(),
+                    ModuleExportName::StringLiteral(sl) => sl.value.as_str(),
+                };
+                let alloca = self.lookup_var(local_name).to_string();
+                let val = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = load i64, ptr {}, align 8",
+                    val, alloca
+                ));
+                let key = self.emit_string_const(exported_name);
+                self.emit(&format!(
+                    "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                    exports, key, val
+                ));
+            }
+        }
+    }
+
+    fn emit_export_default(&mut self, decl: &ExportDefaultDeclaration<'_>) {
+        let mod_id = match self.current_module_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        let val = match &decl.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                // export default function foo() {}
+                if func.id.is_some() {
+                    self.emit_function_decl(func);
+                    let name = func.id.as_ref().unwrap().name.as_str();
+                    if let Some(llvm_name) = self.known_functions.get(name).cloned() {
+                        let arity = func.params.items.len();
+                        // Emit trampoline for indirect calling convention
+                        let tramp_name = format!("{}_tramp", llvm_name);
+                        let mut tramp = String::new();
+                        use std::fmt::Write;
+                        writeln!(tramp, "define i64 @{}(ptr %args, i32 %argc, ptr %closure) {{", tramp_name).unwrap();
+                        writeln!(tramp, "entry:").unwrap();
+                        let mut param_regs = Vec::new();
+                        for i in 0..arity {
+                            writeln!(tramp, "  %p{} = getelementptr i64, ptr %args, i32 {}", i, i).unwrap();
+                            writeln!(tramp, "  %a{} = load i64, ptr %p{}, align 8", i, i).unwrap();
+                            param_regs.push(format!("i64 %a{}", i));
+                        }
+                        writeln!(tramp, "  %r = call i64 @{}({})", llvm_name, param_regs.join(", ")).unwrap();
+                        writeln!(tramp, "  ret i64 %r").unwrap();
+                        writeln!(tramp, "}}").unwrap();
+                        self.functions.push(tramp);
+
+                        let fval = self.fresh_reg();
+                        self.emit(&format!(
+                            "  {} = call i64 @js_func_new(ptr @{}, ptr null, i32 {})",
+                            fval, tramp_name, arity
+                        ));
+                        fval
+                    } else {
+                        format!("{}", JS_UNDEF)
+                    }
+                } else {
+                    // Anonymous default export function
+                    self.emit_arrow_fn(&func.params, func.body.as_ref().unwrap(), false, func.r#async)
+                }
+            }
+            _ => {
+                // export default <expression>
+                if let Some(expr) = decl.declaration.as_expression() {
+                    self.emit_expression(expr)
+                } else {
+                    format!("{}", JS_UNDEF)
+                }
+            }
+        };
+
+        let exports = self.fresh_reg();
+        self.emit(&format!(
+            "  {} = load i64, ptr @__mod_{}_exports",
+            exports, mod_id
+        ));
+        let key = self.emit_string_const("default");
+        self.emit(&format!(
+            "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+            exports, key, val
+        ));
     }
 }

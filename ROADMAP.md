@@ -1,8 +1,8 @@
 # Roadmap: Toward a Working JS Compiler
 
-Current state: compiles JavaScript to native executables via LLVM IR. Phases 1–8 are complete. Comprehensive language support including: NaN-boxed dynamic types, strings (27+ methods), objects, arrays (25+ methods), closures, `this` binding, try/catch/finally, destructuring, spread, JSON.parse/stringify, all synchronous builtins, switch/do-while/for-in, break/continue, compound assignments, bitwise operators, optional chaining (`?.`), nullish coalescing (`??`), Promises, async/await, setTimeout/setInterval, event loop, and fetch() with full HTTP support. Cross-platform (macOS, Linux, Windows).
+Current state: compiles JavaScript to native executables via LLVM IR. Phases 1–9 are complete. Comprehensive language support including: NaN-boxed dynamic types, strings (27+ methods), objects, arrays (25+ methods), closures, `this` binding, try/catch/finally, destructuring, spread, JSON.parse/stringify, all synchronous builtins, switch/do-while/for-in, break/continue, compound assignments, bitwise operators, optional chaining (`?.`), nullish coalescing (`??`), Promises, async/await, setTimeout/setInterval, event loop, and fetch() with full HTTP support. Cross-platform (macOS, Linux, Windows).
 
-Remaining work: modules, classes, and polish.
+Remaining work: classes and polish.
 
 ---
 
@@ -104,11 +104,17 @@ Remaining work: modules, classes, and polish.
 - [x] **Top-level await** — Works at module/script level
 - [x] **Event loop** — Timer-based event loop runs after main code, processes timers in correct time order, exits when no active timers remain
 
-## Phase 9: Module System
+## Phase 9: Module System ✅
 
-- [ ] **import / export** — ES module syntax
-- [ ] **Multiple file compilation** — Compile and link multiple JS files
-- [ ] **Standard library modules** — Bundle built-in modules
+- [x] **Named imports** — `import { x, y } from "./mod.js"`
+- [x] **Default imports** — `import foo from "./mod.js"`
+- [x] **Namespace imports** — `import * as mod from "./mod.js"`
+- [x] **Named exports** — `export function foo() {}`, `export const x = 5`, `export { x, y }`
+- [x] **Default exports** — `export default function() {}`, `export default expr`
+- [x] **Multiple file compilation** — Automatic recursive dependency discovery, topological module init
+- [x] **Module isolation** — Each module runs once (init guard), has its own scope and exports object
+- [x] **Transitive imports** — Module A imports B which imports C — all resolved and compiled
+- [ ] **Standard library modules** — Bundle built-in modules (e.g. `fs`, `path`)
 
 ## Phase 10: Classes
 
@@ -133,8 +139,7 @@ Remaining work: modules, classes, and polish.
 
 The big remaining items are:
 1. **Classes** (Phase 10) — Very common in modern JS, needed for most frameworks
-2. **Modules** (Phase 9) — Multi-file programs with import/export
-3. **Test suite / benchmarks** (Phase 11) — Automated testing and performance comparison
+2. **Test suite / benchmarks** (Phase 11) — Automated testing and performance comparison
 
 ## Architecture note: the runtime library
 

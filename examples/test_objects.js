@@ -13,7 +13,7 @@ console.log(person["name"]);
 // Nested objects
 let config = {
   db: { host: "localhost", port: 5432 },
-  app: { name: "MyApp" }
+  app: { name: "MyApp" },
 };
 console.log(config.db.host);
 console.log(config.db.port);
@@ -27,3 +27,5 @@ console.log(Object.values(obj).join(", "));
 // JSON.stringify
 console.log(JSON.stringify({ a: 1, b: "hello", c: true, d: null }));
 console.log(JSON.stringify([1, 2, 3]));
+
+export { person };
