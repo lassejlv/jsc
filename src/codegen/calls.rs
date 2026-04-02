@@ -143,6 +143,30 @@ impl CodeGen {
                     ));
                     return Some(r);
                 }
+                if obj_name == "Object" && method == "entries" {
+                    let arg = if expr.arguments.is_empty() {
+                        format!("{}", JS_UNDEF)
+                    } else {
+                        self.emit_call_arg(&expr.arguments[0])
+                    };
+                    let r = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_object_entries(i64 {})",
+                        r, arg
+                    ));
+                    return Some(r);
+                }
+                if obj_name == "Object" && method == "assign" && expr.arguments.len() >= 2 {
+                    let target = self.emit_call_arg(&expr.arguments[0]);
+                    for arg in &expr.arguments[1..] {
+                        let source = self.emit_call_arg(arg);
+                        self.emit(&format!(
+                            "  call i64 @js_object_assign(i64 {}, i64 {})",
+                            target, source
+                        ));
+                    }
+                    return Some(target);
+                }
                 if obj_name == "Object" && method == "values" {
                     let arg = if expr.arguments.is_empty() {
                         format!("{}", JS_UNDEF)
@@ -152,6 +176,21 @@ impl CodeGen {
                     let r = self.fresh_reg();
                     self.emit(&format!(
                         "  {} = call i64 @js_object_values(i64 {})",
+                        r, arg
+                    ));
+                    return Some(r);
+                }
+
+                // Array.from
+                if obj_name == "Array" && method == "from" {
+                    let arg = if expr.arguments.is_empty() {
+                        format!("{}", JS_UNDEF)
+                    } else {
+                        self.emit_call_arg(&expr.arguments[0])
+                    };
+                    let r = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_array_from(i64 {})",
                         r, arg
                     ));
                     return Some(r);
@@ -174,10 +213,28 @@ impl CodeGen {
             }
         }
 
-        // Global builtins: prompt, parseInt, parseFloat, isNaN, isFinite, Number, String, Boolean
+        // Global builtins
         if let Expression::Identifier(id) = &expr.callee {
             let name = id.name.as_str();
             match name {
+                "fetch" => {
+                    let url = if expr.arguments.is_empty() {
+                        format!("{}", JS_UNDEF)
+                    } else {
+                        self.emit_call_arg(&expr.arguments[0])
+                    };
+                    let opts = if expr.arguments.len() >= 2 {
+                        self.emit_call_arg(&expr.arguments[1])
+                    } else {
+                        format!("{}", JS_UNDEF)
+                    };
+                    let r = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_fetch(i64 {}, i64 {})",
+                        r, url, opts
+                    ));
+                    return Some(r);
+                }
                 "prompt" => {
                     let arg = if expr.arguments.is_empty() {
                         format!("{}", JS_UNDEF)

@@ -39,6 +39,7 @@ pub struct CodeGen {
     pub(crate) block_terminated: bool,
     pub(crate) current_block: String,
     pub(crate) is_main: bool,
+    pub(crate) loop_stack: Vec<(String, String)>, // (break_label, continue_label)
 }
 
 impl CodeGen {
@@ -57,6 +58,7 @@ impl CodeGen {
             block_terminated: false,
             current_block: "entry".to_string(),
             is_main: false,
+            loop_stack: Vec::new(),
         }
     }
 
@@ -322,6 +324,32 @@ impl CodeGen {
             "declare void @js_object_spread(i64, i64)",
             // this binding
             "declare i64 @js_this_get()",
+            // bitwise operators
+            "declare i64 @js_bitand(i64, i64)",
+            "declare i64 @js_bitor(i64, i64)",
+            "declare i64 @js_bitxor(i64, i64)",
+            "declare i64 @js_shl(i64, i64)",
+            "declare i64 @js_shr(i64, i64)",
+            "declare i64 @js_ushr(i64, i64)",
+            "declare i64 @js_bitnot(i64)",
+            // in / instanceof / delete
+            "declare i64 @js_in(i64, i64)",
+            "declare i64 @js_instanceof(i64, i64)",
+            "declare i64 @js_delete_prop(i64, i64)",
+            // for-in
+            "declare i64 @js_object_keys_or_indices(i64)",
+            // null check for ??
+            "declare i32 @js_is_nullish(i64)",
+            // array.sort / splice
+            "declare i64 @js_array_sort(i64, i64)",
+            "declare i64 @js_array_splice(i64, ptr, i32)",
+            // Object.entries / Object.assign
+            "declare i64 @js_object_entries(i64)",
+            "declare i64 @js_object_assign(i64, i64)",
+            // Array.from
+            "declare i64 @js_array_from(i64)",
+            // fetch
+            "declare i64 @js_fetch(i64, i64)",
         ];
         for d in &decls {
             writeln!(out, "{}", d).unwrap();

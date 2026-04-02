@@ -1,8 +1,8 @@
 # Roadmap: Toward a Working JS Compiler
 
-Current state: compiles JavaScript to native executables via LLVM IR. Phases 1–7 (sync) are complete: NaN-boxed dynamic types, strings (27+ methods), objects, arrays (20+ methods), closures, `this` binding, try/catch/finally, destructuring, spread, JSON.parse/stringify, and all synchronous builtins. Cross-platform (macOS, Linux, Windows).
+Current state: compiles JavaScript to native executables via LLVM IR. Phases 1–7 (sync) are complete. Comprehensive language support including: NaN-boxed dynamic types, strings (27+ methods), objects, arrays (20+ methods including sort/splice), closures, `this` binding, try/catch/finally, destructuring, spread, JSON.parse/stringify, all synchronous builtins, switch/do-while/for-in, break/continue, compound assignments (`+=` etc), bitwise operators, optional chaining (`?.`), nullish coalescing (`??`), `delete`, `in`, `void`, and more. Cross-platform (macOS, Linux, Windows).
 
-Remaining work: async/await, modules, and polish.
+Remaining work: async/await, modules, classes, and polish.
 
 ---
 
@@ -33,15 +33,17 @@ Remaining work: async/await, modules, and polish.
 - [x] **Object literals** — `{ key: value }` as hash maps (FNV-1a hashing, linear probing)
 - [x] **Property access** — `obj.key` and `obj["key"]`
 - [x] **Property assignment** — `obj.key = value` and `obj["key"] = value`
+- [x] **Property deletion** — `delete obj.key`
 - [x] **Arrays** — `[1, 2, 3]` with dynamic resizing
-- [x] **Array methods** — `.push()`, `.pop()`, `.shift()`, `.unshift()`, `.length`, `.indexOf()`, `.includes()`, `.join()`, `.reverse()`, `.slice()`, `.concat()`, `.map()`, `.filter()`, `.forEach()`, `.reduce()`, `.find()`, `.findIndex()`, `.every()`, `.some()`, `.flat()`
+- [x] **Array methods** — `.push()`, `.pop()`, `.shift()`, `.unshift()`, `.length`, `.indexOf()`, `.includes()`, `.join()`, `.reverse()`, `.slice()`, `.concat()`, `.map()`, `.filter()`, `.forEach()`, `.reduce()`, `.find()`, `.findIndex()`, `.every()`, `.some()`, `.flat()`, `.sort()`, `.splice()`, `.fill()`, `.toString()`
 - [x] **for...of loops** — Iterate over arrays
+- [x] **for...in loops** — Iterate over object keys / array indices
 - [x] **Spread operator** — `[...arr]`, `{...obj}`
 - [x] **Destructuring** — `const { a, b } = obj`, `const [x, y] = arr`, nested, defaults, rest elements, function parameters
-- [x] **JSON.stringify** — Implemented
-- [x] **JSON.parse** — Full recursive descent parser with string escapes, nested objects/arrays
-- [x] **Object.keys() / Object.values()** — Implemented
-- [x] **Array.isArray()** — Implemented
+- [x] **JSON.stringify / JSON.parse** — Full round-trip support
+- [x] **Object.keys() / Object.values() / Object.entries()** — Implemented
+- [x] **Object.assign()** — Merge objects
+- [x] **Array.isArray() / Array.from()** — Implemented
 
 ## Phase 5: Closures and First-Class Functions ✅
 
@@ -74,6 +76,24 @@ Remaining work: async/await, modules, and polish.
 - [ ] **setTimeout / setInterval** — Timer-based callbacks
 - [ ] **fetch()** — HTTP requests (link to libcurl or a Rust HTTP client compiled as a static lib)
 
+## Phase 7.5: Operators and Control Flow ✅
+
+- [x] **Compound assignments** — `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `>>>=`
+- [x] **Bitwise operators** — `&`, `|`, `^`, `~`, `<<`, `>>`, `>>>`
+- [x] **Exponentiation** — `**` operator
+- [x] **Nullish coalescing** — `??` (correctly checks null/undefined, not truthiness)
+- [x] **Optional chaining** — `obj?.prop`, `obj?.[key]`
+- [x] **`in` operator** — `"key" in obj`
+- [x] **`delete` operator** — `delete obj.prop`
+- [x] **`void` operator** — `void expr`
+- [x] **`instanceof` operator** — Basic support (placeholder for full prototype chain)
+- [x] **switch statement** — With case/default, break, and fall-through
+- [x] **do...while loop** — Post-condition loop
+- [x] **for...in loop** — Iterate over object keys
+- [x] **break / continue** — In all loop types and switch
+- [x] **Sequence expression** — Comma operator `(a, b, c)`
+- [x] **Labeled statements** — Basic support
+
 ## Phase 8: Async / Await
 
 Required for `fetch()` and modern JS patterns. This is the hardest phase.
@@ -83,18 +103,21 @@ Required for `fetch()` and modern JS patterns. This is the hardest phase.
 - [ ] **await expressions** — Suspend and resume execution
 - [ ] **Event loop** — A minimal event loop runtime for scheduling async work and timers
 
-**Approach options:**
-1. **State machine transform** — Compile each `async` function into a state machine (like what Rust and TypeScript compilers do). Complex but correct.
-2. **Stackful coroutines** — Use platform fibers/coroutines. Simpler codegen but platform-specific.
-3. **Link a runtime** — Use Tokio or libuv compiled as a C library for the event loop.
-
 ## Phase 9: Module System
 
 - [ ] **import / export** — ES module syntax
 - [ ] **Multiple file compilation** — Compile and link multiple JS files
 - [ ] **Standard library modules** — Bundle built-in modules
 
-## Phase 10: Polish and Compatibility
+## Phase 10: Classes
+
+- [ ] **Class declarations** — `class Foo { constructor() {} }`
+- [ ] **Methods** — Instance methods on prototype
+- [ ] **`extends` / `super`** — Inheritance
+- [ ] **Static methods** — `static foo() {}`
+- [ ] **Getters / setters** — `get prop()`, `set prop(v)`
+
+## Phase 11: Polish and Compatibility
 
 - [ ] **Source maps** — Map compiled code back to JS source for debugging
 - [ ] **Better error messages** — Line numbers and context in compile errors
@@ -108,22 +131,24 @@ Required for `fetch()` and modern JS patterns. This is the hardest phase.
 ## What's left
 
 The big remaining items are:
-1. **Stack traces** (Phase 6) — `.stack` property on Error objects
-2. **Async/await** (Phase 8) — The hardest remaining phase, needed for modern JS
-3. **Modules** (Phase 9) — Multi-file programs
-4. **Test suite / benchmarks** (Phase 10) — Automated testing and performance comparison
+1. **Classes** (Phase 10) — Very common in modern JS, needed for most frameworks
+2. **Async/await** (Phase 8) — Hardest phase, needed for I/O-heavy code
+3. **Modules** (Phase 9) — Multi-file programs with import/export
+4. **Test suite / benchmarks** (Phase 11) — Automated testing and performance comparison
 
 ## Architecture note: the runtime library
 
-The runtime library (`runtime/runtime.c`, ~1,200 lines of C) is already in place and provides:
+The runtime library (`runtime/runtime.c`, ~1,600 lines of C) is already in place and provides:
 
 - NaN-boxed value representation and type operations
 - Reference-counted string allocation
-- Object hash map implementation (FNV-1a hashing, linear probing)
-- Dynamic arrays with 20+ methods
-- Closure/function value support
+- Object hash map implementation (FNV-1a hashing, linear probing, property deletion with tombstones)
+- Dynamic arrays with 25+ methods (including sort, splice, fill)
+- Closure/function value support with this-binding stack
 - Error handling via setjmp/longjmp
-- All synchronous built-in functions (Math, console, Date, JSON, etc.)
+- Bitwise operators with proper int32 conversion
+- JSON parser and stringifier
+- All synchronous built-in functions (Math, console, Date, JSON, Object, Array, etc.)
 - Cross-platform support (Windows via `_strdup`/`GetSystemTimeAsFileTime`, POSIX via `strdup`/`gettimeofday`)
 
 This is compiled alongside the generated LLVM IR by clang into the final native executable.

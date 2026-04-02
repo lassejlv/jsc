@@ -7,7 +7,18 @@ use oxc_span::SourceType;
 
 mod codegen;
 
-const RUNTIME_SRC: &str = include_str!("../runtime/runtime.c");
+const RUNTIME_SRC: &str = concat!(
+    include_str!("../runtime/js_types.c"),
+    include_str!("../runtime/js_strings.c"),
+    include_str!("../runtime/js_objects.c"),
+    include_str!("../runtime/js_core.c"),
+    include_str!("../runtime/js_methods.c"),
+    include_str!("../runtime/js_builtins.c"),
+    include_str!("../runtime/js_json.c"),
+    include_str!("../runtime/js_operators.c"),
+    include_str!("../runtime/js_fetch.c"),
+    include_str!("../runtime/js_init.c"),
+);
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ANSI color helpers
@@ -177,6 +188,7 @@ fn main() {
         "-O2".to_string(),
         "-Wno-override-module".to_string(),
     ];
+    clang_args.push("-lcurl".to_string());
     if cfg!(target_os = "linux") {
         clang_args.push("-lm".to_string());
     }

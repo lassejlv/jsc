@@ -28,8 +28,26 @@ impl CodeGen {
             }
             Statement::EmptyStatement(_) => {}
             Statement::TryStatement(s) => self.emit_try(s),
+            Statement::SwitchStatement(s) => self.emit_switch(s),
+            Statement::DoWhileStatement(s) => self.emit_do_while(s),
+            Statement::ForInStatement(s) => self.emit_for_in(s),
+            Statement::BreakStatement(_) => {
+                if let Some((break_label, _)) = self.loop_stack.last().cloned() {
+                    self.emit_br(&break_label);
+                    self.block_terminated = true;
+                }
+            }
+            Statement::ContinueStatement(_) => {
+                if let Some((_, continue_label)) = self.loop_stack.last().cloned() {
+                    self.emit_br(&continue_label);
+                    self.block_terminated = true;
+                }
+            }
+            Statement::LabeledStatement(s) => {
+                self.emit_statement(&s.body);
+            }
             _ => {
-                // Unsupported statement — skip with warning
+                // Unsupported statement — skip
             }
         }
     }
@@ -231,7 +249,9 @@ impl CodeGen {
         self.emit_cond_br(&cond_bool, &body_label, &end_label);
 
         self.emit_label(&body_label);
+        self.loop_stack.push((end_label.clone(), cond_label.clone()));
         self.emit_statement(&stmt.body);
+        self.loop_stack.pop();
         self.emit_br(&cond_label);
 
         self.emit_label(&end_label);
@@ -267,7 +287,9 @@ impl CodeGen {
         }
 
         self.emit_label(&body_label);
+        self.loop_stack.push((end_label.clone(), update_label.clone()));
         self.emit_statement(&stmt.body);
+        self.loop_stack.pop();
         self.emit_br(&update_label);
 
         self.emit_label(&update_label);
@@ -358,9 +380,14 @@ impl CodeGen {
             self.emit_binding_pattern(&decl.declarations[0].id, &elem);
         }
 
+        let update_label = self.fresh_label("forof.update");
+        self.loop_stack.push((end_label.clone(), update_label.clone()));
         self.emit_statement(&stmt.body);
+        self.loop_stack.pop();
+        self.emit_br(&update_label);
 
         // Increment index
+        self.emit_label(&update_label);
         let one = js_number_bits(1.0);
         let next_idx = self.fresh_reg();
         self.emit(&format!(
@@ -486,5 +513,187 @@ impl CodeGen {
 
         self.emit_label(&end_label);
         self.block_terminated = false;
+    }
+
+    fn emit_switch(&mut self, stmt: &SwitchStatement<'_>) {
+        let disc = self.emit_expression(&stmt.discriminant);
+        let end_label = self.fresh_label("sw.end");
+
+        // Switch uses the loop stack so `break` works
+        self.loop_stack.push((end_label.clone(), end_label.clone()));
+
+        let mut next_case_label = self.fresh_label("sw.case");
+        self.emit_br(&next_case_label);
+        let mut fall_through_label: Option<String> = None;
+
+        for (i, case) in stmt.cases.iter().enumerate() {
+            let body_label = self.fresh_label("sw.body");
+            let is_last = i == stmt.cases.len() - 1;
+            let after_label = if is_last {
+                end_label.clone()
+            } else {
+                self.fresh_label("sw.case")
+            };
+
+            if let Some(test) = &case.test {
+                // case <value>:
+                self.emit_label(&next_case_label);
+                if let Some(ft) = &fall_through_label {
+                    // If previous case fell through, merge
+                    let _ = ft;
+                }
+                self.block_terminated = false;
+                let test_val = self.emit_expression(test);
+                let cmp = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = call i64 @js_seq(i64 {}, i64 {})",
+                    cmp, disc, test_val
+                ));
+                let cmp_bool = self.to_bool(&cmp);
+                self.emit_cond_br(&cmp_bool, &body_label, &after_label);
+            } else {
+                // default:
+                self.emit_label(&next_case_label);
+                self.block_terminated = false;
+                self.emit_br(&body_label);
+            }
+
+            self.emit_label(&body_label);
+            self.block_terminated = false;
+            for s in &case.consequent {
+                if self.block_terminated {
+                    break;
+                }
+                self.emit_statement(s);
+            }
+            // Fall through to next case body (or end)
+            if !self.block_terminated {
+                if is_last {
+                    self.emit_br(&end_label);
+                } else {
+                    // Fall through to next case's body
+                    fall_through_label = Some(body_label.clone());
+                    self.emit_br(&after_label);
+                }
+            }
+
+            next_case_label = after_label;
+        }
+
+        self.loop_stack.pop();
+        self.emit_label(&end_label);
+        self.block_terminated = false;
+    }
+
+    fn emit_do_while(&mut self, stmt: &DoWhileStatement<'_>) {
+        let body_label = self.fresh_label("dowhile.body");
+        let cond_label = self.fresh_label("dowhile.cond");
+        let end_label = self.fresh_label("dowhile.end");
+
+        self.emit_br(&body_label);
+        self.emit_label(&body_label);
+        self.loop_stack.push((end_label.clone(), cond_label.clone()));
+        self.emit_statement(&stmt.body);
+        self.loop_stack.pop();
+        self.emit_br(&cond_label);
+
+        self.emit_label(&cond_label);
+        let cond = self.emit_expression(&stmt.test);
+        let cond_bool = self.to_bool(&cond);
+        self.emit_cond_br(&cond_bool, &body_label, &end_label);
+
+        self.emit_label(&end_label);
+    }
+
+    fn emit_for_in(&mut self, stmt: &ForInStatement<'_>) {
+        self.push_scope();
+
+        // Get keys array
+        let obj = self.emit_expression(&stmt.right);
+        let keys = self.fresh_reg();
+        self.emit(&format!(
+            "  {} = call i64 @js_object_keys_or_indices(i64 {})",
+            keys, obj
+        ));
+
+        let len_key = self.emit_string_const("length");
+        let len_val = self.fresh_reg();
+        self.emit(&format!(
+            "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
+            len_val, keys, len_key
+        ));
+
+        // Index counter
+        let idx_alloca = {
+            let m = format!("%forin.idx.{}", self.var_counter);
+            self.var_counter += 1;
+            self.emit(&format!("  {} = alloca i64, align 8", m));
+            self.emit(&format!(
+                "  store i64 {}, ptr {}, align 8",
+                js_number_bits(0.0), m
+            ));
+            m
+        };
+
+        // Declare the iteration variable
+        let var_name = match &stmt.left {
+            ForStatementLeft::VariableDeclaration(decl) => {
+                match &decl.declarations[0].id {
+                    BindingPattern::BindingIdentifier(id) => id.name.as_str().to_string(),
+                    _ => panic!("unsupported for-in variable pattern"),
+                }
+            }
+            _ => panic!("unsupported for-in left-hand side"),
+        };
+        let iter_alloca = self.declare_var(&var_name);
+
+        let cond_label = self.fresh_label("forin.cond");
+        let body_label = self.fresh_label("forin.body");
+        let update_label = self.fresh_label("forin.update");
+        let end_label = self.fresh_label("forin.end");
+
+        self.emit_br(&cond_label);
+        self.emit_label(&cond_label);
+        let idx = self.fresh_reg();
+        self.emit(&format!("  {} = load i64, ptr {}, align 8", idx, idx_alloca));
+        let cmp = self.fresh_reg();
+        self.emit(&format!(
+            "  {} = call i64 @js_lt(i64 {}, i64 {})",
+            cmp, idx, len_val
+        ));
+        let cmp_bool = self.to_bool(&cmp);
+        self.emit_cond_br(&cmp_bool, &body_label, &end_label);
+
+        self.emit_label(&body_label);
+        let key = self.fresh_reg();
+        self.emit(&format!(
+            "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
+            key, keys, idx
+        ));
+        self.emit(&format!(
+            "  store i64 {}, ptr {}, align 8",
+            key, iter_alloca
+        ));
+
+        self.loop_stack.push((end_label.clone(), update_label.clone()));
+        self.emit_statement(&stmt.body);
+        self.loop_stack.pop();
+        self.emit_br(&update_label);
+
+        self.emit_label(&update_label);
+        let one = js_number_bits(1.0);
+        let next_idx = self.fresh_reg();
+        self.emit(&format!(
+            "  {} = call i64 @js_add(i64 {}, i64 {})",
+            next_idx, idx, one
+        ));
+        self.emit(&format!(
+            "  store i64 {}, ptr {}, align 8",
+            next_idx, idx_alloca
+        ));
+        self.emit_br(&cond_label);
+
+        self.emit_label(&end_label);
+        self.pop_scope();
     }
 }
