@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo init:*)",
+      "Bash(llvm-config --version)",
+      "Read(//c/Users/veste/scoop/apps/llvm/current/bin/**)",
+      "Bash(/c/Users/veste/scoop/apps/llvm/current/bin/llvm-config --version)",
+      "Bash(/c/Users/veste/scoop/apps/llvm/current/bin/llvm-config.exe --version)",
+      "Bash(clang --version)",
+      "Bash(ls /c/Users/veste/scoop/apps/llvm/current/bin/llvm-config*)",
+      "Read(//c/Users/veste/scoop/apps/llvm/current/lib/cmake/llvm//**)",
+      "Bash(/c/Users/veste/scoop/apps/llvm/current/bin/clang.exe --version)",
+      "WebSearch",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:crates.io)",
+      "WebFetch(domain:oxc.rs)",
+      "Bash(cargo search:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo run:*)",
+      "Bash(./examples/test1.exe:*)",
+      "Bash(./examples/test2.exe)",
+      "Bash(./examples/test3.exe)",
+      "Bash(./examples/test4.exe)"
+    ]
+  }
+}
