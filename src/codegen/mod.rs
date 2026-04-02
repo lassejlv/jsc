@@ -310,6 +310,18 @@ impl CodeGen {
             "declare i64 @js_array_is_array(i64)",
             "declare i64 @js_error_new(ptr)",
             "declare ptr @js_alloc_closure_env(i32)",
+            // try/catch
+            "declare ptr @js_try_get_buf()",
+            "declare void @js_try_exit()",
+            "declare i64 @js_get_error()",
+            "declare i32 @_setjmp(ptr)",
+            // JSON.parse
+            "declare i64 @js_json_parse(i64)",
+            // spread
+            "declare void @js_array_concat_into(i64, i64)",
+            "declare void @js_object_spread(i64, i64)",
+            // this binding
+            "declare i64 @js_this_get()",
         ];
         for d in &decls {
             writeln!(out, "{}", d).unwrap();

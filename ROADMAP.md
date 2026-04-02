@@ -1,8 +1,8 @@
 # Roadmap: Toward a Working JS Compiler
 
-Current state: compiles JavaScript to native executables via LLVM IR. Has a full NaN-boxed dynamic type system, heap-allocated strings with 27+ methods, objects (hash maps), arrays with 20+ methods, closures, first-class functions, and a comprehensive C runtime library. Cross-platform (macOS, Linux, Windows).
+Current state: compiles JavaScript to native executables via LLVM IR. Phases 1–7 (sync) are complete: NaN-boxed dynamic types, strings (27+ methods), objects, arrays (20+ methods), closures, `this` binding, try/catch/finally, destructuring, spread, JSON.parse/stringify, and all synchronous builtins. Cross-platform (macOS, Linux, Windows).
 
-This roadmap outlines what's been done and what's needed to support more real-world JS patterns like `fetch()`, async/await, modules, and more.
+Remaining work: async/await, modules, and polish.
 
 ---
 
@@ -28,7 +28,7 @@ This roadmap outlines what's been done and what's needed to support more real-wo
 - [ ] **Cycle-safe GC** — Mark-and-sweep garbage collector (for circular references)
 - [x] **Runtime allocator** — C runtime library (`runtime.c`) linked into every compiled program, uses malloc/free
 
-## Phase 4: Objects and Arrays (mostly done)
+## Phase 4: Objects and Arrays ✅
 
 - [x] **Object literals** — `{ key: value }` as hash maps (FNV-1a hashing, linear probing)
 - [x] **Property access** — `obj.key` and `obj["key"]`
@@ -36,27 +36,27 @@ This roadmap outlines what's been done and what's needed to support more real-wo
 - [x] **Arrays** — `[1, 2, 3]` with dynamic resizing
 - [x] **Array methods** — `.push()`, `.pop()`, `.shift()`, `.unshift()`, `.length`, `.indexOf()`, `.includes()`, `.join()`, `.reverse()`, `.slice()`, `.concat()`, `.map()`, `.filter()`, `.forEach()`, `.reduce()`, `.find()`, `.findIndex()`, `.every()`, `.some()`, `.flat()`
 - [x] **for...of loops** — Iterate over arrays
-- [ ] **Spread operator** — `[...arr]`, `{...obj}`
-- [ ] **Destructuring** — `const { a, b } = obj`, `const [x, y] = arr`
+- [x] **Spread operator** — `[...arr]`, `{...obj}`
+- [x] **Destructuring** — `const { a, b } = obj`, `const [x, y] = arr`, nested, defaults, rest elements, function parameters
 - [x] **JSON.stringify** — Implemented
-- [ ] **JSON.parse** — Not yet implemented
+- [x] **JSON.parse** — Full recursive descent parser with string escapes, nested objects/arrays
 - [x] **Object.keys() / Object.values()** — Implemented
 - [x] **Array.isArray()** — Implemented
 
-## Phase 5: Closures and First-Class Functions (mostly done)
+## Phase 5: Closures and First-Class Functions ✅
 
 - [x] **Function expressions** — `const add = function(a, b) { return a + b; }`
 - [x] **Arrow functions** — `(a, b) => a + b`
 - [x] **Closures** — Capture variables from enclosing scope by value into heap-allocated closure environment
 - [x] **Callbacks** — Pass functions as arguments
 - [x] **Higher-order functions** — Functions returning functions
-- [ ] **`this` binding** — Basic `this` semantics (at least for method calls)
+- [x] **`this` binding** — `this` in method calls via a runtime this-stack, user-defined methods on objects
 
-## Phase 6: Error Handling (partial)
+## Phase 6: Error Handling ✅
 
-- [ ] **try / catch / finally** — Partial: try body executes, catch/finally not yet wired up (setjmp/longjmp plumbing exists in runtime)
+- [x] **try / catch / finally** — Full implementation using setjmp/longjmp, supports catch with/without parameter, finally blocks, nesting
 - [x] **throw** — Throw any value (implemented via setjmp/longjmp)
-- [x] **Error objects** — `new Error("message")` with `.message`
+- [x] **Error objects** — `new Error("message")` with `.message` and `.name`
 - [ ] **Stack traces** — `.stack` property on Error objects
 
 ## Phase 7: Built-in Functions and I/O Runtime
@@ -108,11 +108,10 @@ Required for `fetch()` and modern JS patterns. This is the hardest phase.
 ## What's left
 
 The big remaining items are:
-1. **Spread / destructuring** (Phase 4) — Quality-of-life syntax features
-2. **try/catch wiring** (Phase 6) — Runtime has setjmp/longjmp, codegen needs to emit the proper catch blocks
-3. **`this` binding** (Phase 5) — Needed for OOP patterns
-4. **Async/await** (Phase 8) — The hardest remaining phase, needed for modern JS
-5. **Modules** (Phase 9) — Multi-file programs
+1. **Stack traces** (Phase 6) — `.stack` property on Error objects
+2. **Async/await** (Phase 8) — The hardest remaining phase, needed for modern JS
+3. **Modules** (Phase 9) — Multi-file programs
+4. **Test suite / benchmarks** (Phase 10) — Automated testing and performance comparison
 
 ## Architecture note: the runtime library
 

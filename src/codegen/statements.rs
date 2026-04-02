@@ -36,20 +36,159 @@ impl CodeGen {
 
     pub(crate) fn emit_var_decl(&mut self, decl: &VariableDeclaration<'_>) {
         for declarator in &decl.declarations {
-            let name = match &declarator.id {
-                BindingPattern::BindingIdentifier(id) => id.name.as_str().to_string(),
-                _ => panic!("unsupported variable binding pattern"),
-            };
-            let alloca = self.declare_var(&name);
             let init_val = if let Some(init) = &declarator.init {
                 self.emit_expression(init)
             } else {
                 format!("{}", JS_UNDEF)
             };
-            self.emit(&format!(
-                "  store i64 {}, ptr {}, align 8",
-                init_val, alloca
-            ));
+            self.emit_binding_pattern(&declarator.id, &init_val);
+        }
+    }
+
+    /// Recursively destructure a binding pattern, assigning from `value_reg`.
+    pub(crate) fn emit_binding_pattern(&mut self, pattern: &BindingPattern, value_reg: &str) {
+        match pattern {
+            BindingPattern::BindingIdentifier(id) => {
+                let alloca = self.declare_var(id.name.as_str());
+                self.emit(&format!(
+                    "  store i64 {}, ptr {}, align 8",
+                    value_reg, alloca
+                ));
+            }
+            BindingPattern::ObjectPattern(op) => {
+                for prop in &op.properties {
+                    let (key_name, binding) = match &prop.key {
+                        PropertyKey::StaticIdentifier(id) => {
+                            (id.name.as_str().to_string(), &prop.value)
+                        }
+                        PropertyKey::StringLiteral(s) => {
+                            (s.value.as_str().to_string(), &prop.value)
+                        }
+                        _ => continue,
+                    };
+                    let key_reg = self.emit_string_const(&key_name);
+                    let prop_val = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
+                        prop_val, value_reg, key_reg
+                    ));
+                    self.emit_binding_pattern(binding, &prop_val);
+                }
+                if let Some(rest) = &op.rest {
+                    // Rest element: bind remaining properties (simplified — binds full object)
+                    self.emit_binding_pattern(&rest.argument, value_reg);
+                }
+            }
+            BindingPattern::ArrayPattern(ap) => {
+                for (i, elem) in ap.elements.iter().enumerate() {
+                    if let Some(binding) = elem {
+                        let idx_reg = format!("{}", js_number_bits(i as f64));
+                        let elem_val = self.fresh_reg();
+                        self.emit(&format!(
+                            "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
+                            elem_val, value_reg, idx_reg
+                        ));
+                        self.emit_binding_pattern(binding, &elem_val);
+                    }
+                    // None = elision, skip
+                }
+                if let Some(rest) = &ap.rest {
+                    // Rest element: create array from remaining elements
+                    let start_idx = ap.elements.len();
+                    let rest_arr = self.fresh_reg();
+                    self.emit(&format!("  {} = call i64 @js_array_new()", rest_arr));
+
+                    let len_key = self.emit_string_const("length");
+                    let len_val = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
+                        len_val, value_reg, len_key
+                    ));
+
+                    // Loop from start_idx to length
+                    let idx_alloca = {
+                        let m = format!("%rest.idx.{}", self.var_counter);
+                        self.var_counter += 1;
+                        self.emit(&format!("  {} = alloca i64, align 8", m));
+                        self.emit(&format!(
+                            "  store i64 {}, ptr {}, align 8",
+                            js_number_bits(start_idx as f64), m
+                        ));
+                        m
+                    };
+
+                    let cond_label = self.fresh_label("rest.cond");
+                    let body_label = self.fresh_label("rest.body");
+                    let end_label = self.fresh_label("rest.end");
+
+                    self.emit_br(&cond_label);
+                    self.emit_label(&cond_label);
+                    let idx = self.fresh_reg();
+                    self.emit(&format!("  {} = load i64, ptr {}, align 8", idx, idx_alloca));
+                    let cmp = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_lt(i64 {}, i64 {})",
+                        cmp, idx, len_val
+                    ));
+                    let cmp_bool = self.to_bool(&cmp);
+                    self.emit_cond_br(&cmp_bool, &body_label, &end_label);
+
+                    self.emit_label(&body_label);
+                    let elem = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
+                        elem, value_reg, idx
+                    ));
+                    self.emit(&format!(
+                        "  call i64 @js_array_push_val(i64 {}, i64 {})",
+                        rest_arr, elem
+                    ));
+                    let one = js_number_bits(1.0);
+                    let next_idx = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_add(i64 {}, i64 {})",
+                        next_idx, idx, one
+                    ));
+                    self.emit(&format!(
+                        "  store i64 {}, ptr {}, align 8",
+                        next_idx, idx_alloca
+                    ));
+                    self.emit_br(&cond_label);
+
+                    self.emit_label(&end_label);
+                    self.emit_binding_pattern(&rest.argument, &rest_arr);
+                }
+            }
+            BindingPattern::AssignmentPattern(ap) => {
+                // Default value: if value is undefined, use the default
+                let is_undef = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = icmp eq i64 {}, {}",
+                    is_undef, value_reg, JS_UNDEF
+                ));
+                let default_label = self.fresh_label("default.yes");
+                let no_default_label = self.fresh_label("default.no");
+                let merge_label = self.fresh_label("default.merge");
+
+                self.emit_cond_br(&is_undef, &default_label, &no_default_label);
+
+                self.emit_label(&default_label);
+                let default_val = self.emit_expression(&ap.right);
+                let default_block = self.current_block.clone();
+                self.emit_br(&merge_label);
+
+                self.emit_label(&no_default_label);
+                let no_default_block = self.current_block.clone();
+                self.emit_br(&merge_label);
+
+                self.emit_label(&merge_label);
+                let final_val = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = phi i64 [ {}, %{} ], [ {}, %{} ]",
+                    final_val, default_val, default_block, value_reg, no_default_block
+                ));
+                self.emit_binding_pattern(&ap.left, &final_val);
+            }
         }
     }
 
@@ -165,17 +304,20 @@ impl CodeGen {
             m
         };
 
-        // Declare the iteration variable
-        let iter_var_name = match &stmt.left {
-            ForStatementLeft::VariableDeclaration(decl) => {
-                match &decl.declarations[0].id {
-                    BindingPattern::BindingIdentifier(id) => id.name.as_str().to_string(),
-                    _ => panic!("unsupported for-of variable pattern"),
-                }
-            }
+        // Get the binding pattern from the for-of left-hand side
+        let decl = match &stmt.left {
+            ForStatementLeft::VariableDeclaration(decl) => decl,
             _ => panic!("unsupported for-of left-hand side"),
         };
-        let iter_alloca = self.declare_var(&iter_var_name);
+        let is_simple = matches!(
+            &decl.declarations[0].id,
+            BindingPattern::BindingIdentifier(_)
+        );
+
+        // Pre-declare simple identifier variables before the loop
+        if let BindingPattern::BindingIdentifier(id) = &decl.declarations[0].id {
+            self.declare_var(id.name.as_str());
+        }
 
         let cond_label = self.fresh_label("forof.cond");
         let body_label = self.fresh_label("forof.body");
@@ -202,10 +344,19 @@ impl CodeGen {
             "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
             elem, iterable, idx
         ));
-        self.emit(&format!(
-            "  store i64 {}, ptr {}, align 8",
-            elem, iter_alloca
-        ));
+
+        // Assign element via binding pattern (supports destructuring)
+        if is_simple {
+            if let BindingPattern::BindingIdentifier(id) = &decl.declarations[0].id {
+                let alloca = self.lookup_var(id.name.as_str()).to_string();
+                self.emit(&format!(
+                    "  store i64 {}, ptr {}, align 8",
+                    elem, alloca
+                ));
+            }
+        } else {
+            self.emit_binding_pattern(&decl.declarations[0].id, &elem);
+        }
 
         self.emit_statement(&stmt.body);
 
@@ -248,11 +399,92 @@ impl CodeGen {
     }
 
     fn emit_try(&mut self, stmt: &TryStatement<'_>) {
-        // Basic try/catch is complex with setjmp — for now, just execute the try body
-        // and skip catch. Errors will still exit via js_throw.
+        let try_label = self.fresh_label("try.body");
+        let catch_label = self.fresh_label("try.catch");
+        let finally_label = self.fresh_label("try.finally");
+        let end_label = self.fresh_label("try.end");
+
+        let has_catch = stmt.handler.is_some();
+        let has_finally = stmt.finalizer.is_some();
+        let after_try = if has_finally { &finally_label } else { &end_label };
+        let after_catch = if has_finally { &finally_label } else { &end_label };
+
+        // Get jmp_buf and call setjmp
+        let buf_ptr = self.fresh_reg();
+        self.emit(&format!("  {} = call ptr @js_try_get_buf()", buf_ptr));
+        let setjmp_ret = self.fresh_reg();
+        self.emit(&format!(
+            "  {} = call i32 @_setjmp(ptr {})",
+            setjmp_ret, buf_ptr
+        ));
+        let is_catch = self.fresh_reg();
+        self.emit(&format!(
+            "  {} = icmp ne i32 {}, 0",
+            is_catch, setjmp_ret
+        ));
+
+        if has_catch {
+            self.emit_cond_br(&is_catch, &catch_label, &try_label);
+        } else {
+            self.emit_cond_br(&is_catch, after_try, &try_label);
+        }
+
+        // Try body
+        self.emit_label(&try_label);
+        self.push_scope();
         for s in &stmt.block.body {
+            if self.block_terminated {
+                break;
+            }
             self.emit_statement(s);
         }
-        // TODO: implement proper try/catch with setjmp/longjmp
+        self.pop_scope();
+        if !self.block_terminated {
+            self.emit("  call void @js_try_exit()");
+        }
+        self.emit_br(after_try);
+
+        // Catch body
+        if let Some(handler) = &stmt.handler {
+            self.emit_label(&catch_label);
+            self.block_terminated = false;
+            self.push_scope();
+
+            // Get the thrown error value
+            let err_val = self.fresh_reg();
+            self.emit(&format!("  {} = call i64 @js_get_error()", err_val));
+
+            // Bind the catch parameter
+            if let Some(param) = &handler.param {
+                self.emit_binding_pattern(&param.pattern, &err_val);
+            }
+
+            for s in &handler.body.body {
+                if self.block_terminated {
+                    break;
+                }
+                self.emit_statement(s);
+            }
+            self.pop_scope();
+            self.emit_br(after_catch);
+        }
+
+        // Finally body
+        if has_finally {
+            self.emit_label(&finally_label);
+            self.block_terminated = false;
+            if let Some(finalizer) = &stmt.finalizer {
+                for s in &finalizer.body {
+                    if self.block_terminated {
+                        break;
+                    }
+                    self.emit_statement(s);
+                }
+            }
+            self.emit_br(&end_label);
+        }
+
+        self.emit_label(&end_label);
+        self.block_terminated = false;
     }
 }

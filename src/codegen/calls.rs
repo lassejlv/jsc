@@ -99,6 +99,21 @@ impl CodeGen {
                     return Some(r);
                 }
 
+                // JSON.parse
+                if obj_name == "JSON" && method == "parse" {
+                    let arg = if expr.arguments.is_empty() {
+                        format!("{}", JS_UNDEF)
+                    } else {
+                        self.emit_call_arg(&expr.arguments[0])
+                    };
+                    let r = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_json_parse(i64 {})",
+                        r, arg
+                    ));
+                    return Some(r);
+                }
+
                 // JSON.stringify
                 if obj_name == "JSON" && method == "stringify" {
                     let arg = if expr.arguments.is_empty() {

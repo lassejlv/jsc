@@ -47,6 +47,12 @@ impl CodeGen {
                     format!("{}", JS_UNDEF)
                 }
             }
+            Expression::ThisExpression(_) => {
+                let reg = self.fresh_reg();
+                self.emit(&format!("  {} = call i64 @js_this_get()", reg));
+                reg
+            }
+            Expression::NewExpression(ne) => self.emit_new(ne),
             _ => format!("{}", JS_UNDEF), // unsupported → undefined
         }
     }
@@ -242,6 +248,43 @@ impl CodeGen {
         } else {
             old_val
         }
+    }
+
+    pub(crate) fn emit_new(&mut self, ne: &NewExpression<'_>) -> String {
+        // new Error("message")
+        if let Expression::Identifier(id) = &ne.callee {
+            if id.name.as_str() == "Error" {
+                let msg = if ne.arguments.is_empty() {
+                    self.intern_string("")
+                } else {
+                    let arg = self.emit_call_arg(&ne.arguments[0]);
+                    // Convert to C string via a temp
+                    let str_global = self.intern_string("");
+                    let _ = str_global;
+                    // Use js_error_new with a cstring — but we have a JSValue.
+                    // Simpler: build an object with message property manually
+                    let obj = self.fresh_reg();
+                    self.emit(&format!("  {} = call i64 @js_object_new()", obj));
+                    let key = self.emit_string_const("message");
+                    self.emit(&format!(
+                        "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                        obj, key, arg
+                    ));
+                    let name_key = self.emit_string_const("name");
+                    let name_val = self.emit_string_const("Error");
+                    self.emit(&format!(
+                        "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                        obj, name_key, name_val
+                    ));
+                    return obj;
+                };
+                let reg = self.fresh_reg();
+                self.emit(&format!("  {} = call i64 @js_error_new(ptr {})", reg, msg));
+                return reg;
+            }
+        }
+        // Fallback: treat as regular function call
+        format!("{}", JS_UNDEF)
     }
 
     pub(crate) fn emit_call_arg(&mut self, arg: &Argument<'_>) -> String {

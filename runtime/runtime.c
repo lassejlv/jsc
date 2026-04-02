@@ -27,6 +27,11 @@
 
 typedef int64_t JSValue;
 
+// Forward declarations
+void js_this_push(JSValue v);
+void js_this_pop(void);
+JSValue js_this_get(void);
+
 #define QNAN        ((uint64_t)0x7FFC000000000000ULL)
 #define SIGN_BIT    ((uint64_t)0x8000000000000000ULL)
 
@@ -970,6 +975,18 @@ JSValue js_call_method(JSValue this_val, const char* method, JSValue* args, int 
         }
     }
 
+    // User-defined method: look up function-valued property and call with this
+    if (js_is_object(this_val)) {
+        JSValue method_val = js_object_get((JSObject*)js_as_ptr(this_val), method);
+        if (js_is_function(method_val)) {
+            JSFunction* fn = (JSFunction*)js_as_ptr(method_val);
+            js_this_push(this_val);
+            JSValue result = fn->fn(args, argc, fn->closure_env);
+            js_this_pop();
+            return result;
+        }
+    }
+
     fprintf(stderr, "TypeError: %s is not a function\n", method);
     exit(1);
     return JS_UNDEFINED;
@@ -1219,6 +1236,207 @@ JSValue js_object_values(JSValue v) {
 // Array.isArray
 JSValue js_array_is_array(JSValue v) {
     return js_is_array(v) ? JS_TRUE : JS_FALSE;
+}
+
+// ============================================================
+// JSON.parse
+// ============================================================
+
+typedef struct { const char* src; int pos; int len; } JSONParser;
+
+static void json_skip_ws(JSONParser* p) {
+    while (p->pos < p->len) {
+        char c = p->src[p->pos];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') p->pos++;
+        else break;
+    }
+}
+
+static JSValue json_parse_value(JSONParser* p);
+
+static JSValue json_parse_string(JSONParser* p) {
+    p->pos++; // skip opening "
+    int cap = 64, len = 0;
+    char* buf = (char*)malloc(cap);
+    while (p->pos < p->len && p->src[p->pos] != '"') {
+        char c = p->src[p->pos++];
+        if (c == '\\' && p->pos < p->len) {
+            c = p->src[p->pos++];
+            switch (c) {
+                case '"': c = '"'; break;
+                case '\\': c = '\\'; break;
+                case '/': c = '/'; break;
+                case 'n': c = '\n'; break;
+                case 'r': c = '\r'; break;
+                case 't': c = '\t'; break;
+                case 'b': c = '\b'; break;
+                case 'f': c = '\f'; break;
+                case 'u': {
+                    // Basic \uXXXX — decode to UTF-8
+                    unsigned int cp = 0;
+                    for (int i = 0; i < 4 && p->pos < p->len; i++, p->pos++) {
+                        char h = p->src[p->pos];
+                        cp <<= 4;
+                        if (h >= '0' && h <= '9') cp |= h - '0';
+                        else if (h >= 'a' && h <= 'f') cp |= h - 'a' + 10;
+                        else if (h >= 'A' && h <= 'F') cp |= h - 'A' + 10;
+                    }
+                    if (cp < 0x80) {
+                        if (len + 1 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+                        buf[len++] = (char)cp;
+                    } else if (cp < 0x800) {
+                        if (len + 2 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+                        buf[len++] = (char)(0xC0 | (cp >> 6));
+                        buf[len++] = (char)(0x80 | (cp & 0x3F));
+                    } else {
+                        if (len + 3 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+                        buf[len++] = (char)(0xE0 | (cp >> 12));
+                        buf[len++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                        buf[len++] = (char)(0x80 | (cp & 0x3F));
+                    }
+                    continue;
+                }
+                default: break;
+            }
+        }
+        if (len + 1 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+        buf[len++] = c;
+    }
+    if (p->pos < p->len) p->pos++; // skip closing "
+    buf[len] = '\0';
+    JSValue r = js_string_from_len(buf, len);
+    free(buf);
+    return r;
+}
+
+static JSValue json_parse_number(JSONParser* p) {
+    int start = p->pos;
+    if (p->src[p->pos] == '-') p->pos++;
+    while (p->pos < p->len && p->src[p->pos] >= '0' && p->src[p->pos] <= '9') p->pos++;
+    if (p->pos < p->len && p->src[p->pos] == '.') {
+        p->pos++;
+        while (p->pos < p->len && p->src[p->pos] >= '0' && p->src[p->pos] <= '9') p->pos++;
+    }
+    if (p->pos < p->len && (p->src[p->pos] == 'e' || p->src[p->pos] == 'E')) {
+        p->pos++;
+        if (p->pos < p->len && (p->src[p->pos] == '+' || p->src[p->pos] == '-')) p->pos++;
+        while (p->pos < p->len && p->src[p->pos] >= '0' && p->src[p->pos] <= '9') p->pos++;
+    }
+    char tmp[64];
+    int slen = p->pos - start;
+    if (slen >= 64) slen = 63;
+    memcpy(tmp, p->src + start, slen);
+    tmp[slen] = '\0';
+    return js_number(strtod(tmp, NULL));
+}
+
+static JSValue json_parse_array(JSONParser* p) {
+    p->pos++; // skip [
+    JSValue arr = js_array_new();
+    json_skip_ws(p);
+    if (p->pos < p->len && p->src[p->pos] == ']') { p->pos++; return arr; }
+    while (p->pos < p->len) {
+        json_skip_ws(p);
+        js_array_push_val(arr, json_parse_value(p));
+        json_skip_ws(p);
+        if (p->pos < p->len && p->src[p->pos] == ',') { p->pos++; continue; }
+        break;
+    }
+    if (p->pos < p->len && p->src[p->pos] == ']') p->pos++;
+    return arr;
+}
+
+static JSValue json_parse_object(JSONParser* p) {
+    p->pos++; // skip {
+    JSValue obj = js_object_new();
+    json_skip_ws(p);
+    if (p->pos < p->len && p->src[p->pos] == '}') { p->pos++; return obj; }
+    while (p->pos < p->len) {
+        json_skip_ws(p);
+        if (p->pos >= p->len || p->src[p->pos] != '"') break;
+        JSValue key = json_parse_string(p);
+        json_skip_ws(p);
+        if (p->pos < p->len && p->src[p->pos] == ':') p->pos++;
+        json_skip_ws(p);
+        JSValue val = json_parse_value(p);
+        char* ks = js_to_cstring(key);
+        js_object_set((JSObject*)js_as_ptr(obj), ks, val);
+        free(ks);
+        json_skip_ws(p);
+        if (p->pos < p->len && p->src[p->pos] == ',') { p->pos++; continue; }
+        break;
+    }
+    if (p->pos < p->len && p->src[p->pos] == '}') p->pos++;
+    return obj;
+}
+
+static JSValue json_parse_value(JSONParser* p) {
+    json_skip_ws(p);
+    if (p->pos >= p->len) return JS_UNDEFINED;
+    char c = p->src[p->pos];
+    if (c == '"') return json_parse_string(p);
+    if (c == '[') return json_parse_array(p);
+    if (c == '{') return json_parse_object(p);
+    if (c == 't' && p->pos + 4 <= p->len && memcmp(p->src + p->pos, "true", 4) == 0) { p->pos += 4; return JS_TRUE; }
+    if (c == 'f' && p->pos + 5 <= p->len && memcmp(p->src + p->pos, "false", 5) == 0) { p->pos += 5; return JS_FALSE; }
+    if (c == 'n' && p->pos + 4 <= p->len && memcmp(p->src + p->pos, "null", 4) == 0) { p->pos += 4; return JS_NULL; }
+    if (c == '-' || (c >= '0' && c <= '9')) return json_parse_number(p);
+    // Invalid JSON
+    js_throw(js_string_from_cstr("SyntaxError: Unexpected token in JSON"));
+    return JS_UNDEFINED;
+}
+
+JSValue js_json_parse(JSValue str) {
+    char* s = js_to_cstring(str);
+    JSONParser p = { s, 0, (int)strlen(s) };
+    JSValue result = json_parse_value(&p);
+    free(s);
+    return result;
+}
+
+// ============================================================
+// Spread helpers
+// ============================================================
+
+void js_array_concat_into(JSValue target, JSValue source) {
+    if (!js_is_array(source)) {
+        js_array_push_val(target, source);
+        return;
+    }
+    JSArray* src = (JSArray*)js_as_ptr(source);
+    for (int i = 0; i < src->length; i++) {
+        js_array_push_val(target, src->data[i]);
+    }
+}
+
+void js_object_spread(JSValue target, JSValue source) {
+    if (!js_is_object(source)) return;
+    JSObject* src = (JSObject*)js_as_ptr(source);
+    JSObject* tgt = (JSObject*)js_as_ptr(target);
+    for (int i = 0; i < src->capacity; i++) {
+        if (src->entries[i].occupied == 1)
+            js_object_set(tgt, src->entries[i].key, src->entries[i].value);
+    }
+}
+
+// ============================================================
+// this binding
+// ============================================================
+
+#define MAX_THIS_DEPTH 64
+static JSValue js_this_stack[MAX_THIS_DEPTH];
+static int js_this_sp = 0;
+
+void js_this_push(JSValue v) {
+    if (js_this_sp < MAX_THIS_DEPTH) js_this_stack[js_this_sp++] = v;
+}
+
+void js_this_pop(void) {
+    if (js_this_sp > 0) js_this_sp--;
+}
+
+JSValue js_this_get(void) {
+    return js_this_sp > 0 ? js_this_stack[js_this_sp - 1] : JS_UNDEFINED;
 }
 
 // ============================================================

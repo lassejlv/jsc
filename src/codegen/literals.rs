@@ -29,7 +29,13 @@ impl CodeGen {
                         obj, key, val
                     ));
                 }
-                _ => {} // skip spread, etc.
+                ObjectPropertyKind::SpreadProperty(spread) => {
+                    let source = self.emit_expression(&spread.argument);
+                    self.emit(&format!(
+                        "  call void @js_object_spread(i64 {}, i64 {})",
+                        obj, source
+                    ));
+                }
             }
         }
         obj
@@ -41,8 +47,12 @@ impl CodeGen {
 
         for elem in &expr.elements {
             match elem {
-                ArrayExpressionElement::SpreadElement(_) => {
-                    // TODO: spread
+                ArrayExpressionElement::SpreadElement(spread) => {
+                    let source = self.emit_expression(&spread.argument);
+                    self.emit(&format!(
+                        "  call void @js_array_concat_into(i64 {}, i64 {})",
+                        arr, source
+                    ));
                 }
                 _ => {
                     if let Some(expr) = elem.as_expression() {

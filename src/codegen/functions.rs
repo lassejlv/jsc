@@ -23,18 +23,18 @@ impl CodeGen {
         self.current_block = "entry".to_string();
         self.is_main = false;
 
-        // Collect params
-        let mut param_names = Vec::new();
-        for param in &func.params.items {
-            let pname = match &param.pattern {
+        // Collect params — use simple names for identifiers, synthetic names for destructured
+        let mut param_ir_names = Vec::new();
+        for (i, param) in func.params.items.iter().enumerate() {
+            let ir_name = match &param.pattern {
                 BindingPattern::BindingIdentifier(id) => id.name.as_str().to_string(),
-                _ => panic!("unsupported parameter pattern"),
+                _ => format!("__arg{}", i),
             };
-            param_names.push(pname);
+            param_ir_names.push(ir_name);
         }
 
         // Build param list
-        let param_ir: Vec<String> = param_names
+        let param_ir: Vec<String> = param_ir_names
             .iter()
             .map(|p| format!("i64 %param.{}", p))
             .collect();
@@ -46,13 +46,31 @@ impl CodeGen {
         ));
         self.emit("entry:");
 
-        // Alloca + store params
-        for pname in &param_names {
-            let alloca = self.declare_var(pname);
-            self.emit(&format!(
-                "  store i64 %param.{}, ptr {}, align 8",
-                pname, alloca
-            ));
+        // Bind params — simple names get alloca+store, destructured get emit_binding_pattern
+        for (i, param) in func.params.items.iter().enumerate() {
+            let ir_name = &param_ir_names[i];
+            match &param.pattern {
+                BindingPattern::BindingIdentifier(id) => {
+                    let alloca = self.declare_var(id.name.as_str());
+                    self.emit(&format!(
+                        "  store i64 %param.{}, ptr {}, align 8",
+                        ir_name, alloca
+                    ));
+                }
+                pattern => {
+                    // Store the param into a temp alloca, then destructure
+                    let tmp = format!("%param.tmp.{}", self.var_counter);
+                    self.var_counter += 1;
+                    self.emit(&format!("  {} = alloca i64, align 8", tmp));
+                    self.emit(&format!(
+                        "  store i64 %param.{}, ptr {}, align 8",
+                        ir_name, tmp
+                    ));
+                    let val = self.fresh_reg();
+                    self.emit(&format!("  {} = load i64, ptr {}, align 8", val, tmp));
+                    self.emit_binding_pattern(pattern, &val);
+                }
+            }
         }
 
         // Emit body
@@ -110,14 +128,12 @@ impl CodeGen {
         self.current_block = "entry".to_string();
         self.is_main = false;
 
-        // Collect param names
-        let mut param_names = Vec::new();
+        // Collect simple param names (for closure shadowing check)
+        let mut simple_param_names: Vec<String> = Vec::new();
         for param in &params.items {
-            let pname = match &param.pattern {
-                BindingPattern::BindingIdentifier(id) => id.name.as_str().to_string(),
-                _ => panic!("unsupported parameter pattern"),
-            };
-            param_names.push(pname);
+            if let BindingPattern::BindingIdentifier(id) = &param.pattern {
+                simple_param_names.push(id.name.as_str().to_string());
+            }
         }
 
         // Arrow/function expressions use indirect calling convention:
@@ -131,7 +147,7 @@ impl CodeGen {
         // Restore captured variables from closure env into local allocas
         for (i, (name, _)) in outer_vars.iter().enumerate() {
             // Skip if a parameter has the same name (param takes precedence)
-            if param_names.contains(name) {
+            if simple_param_names.contains(name) {
                 continue;
             }
             let alloca = self.declare_var(name);
@@ -152,8 +168,7 @@ impl CodeGen {
         }
 
         // Unpack args into local variables (after captures, so params override)
-        for (i, pname) in param_names.iter().enumerate() {
-            let alloca = self.declare_var(pname);
+        for (i, param) in params.items.iter().enumerate() {
             let ptr_reg = self.fresh_reg();
             self.emit(&format!(
                 "  {} = getelementptr i64, ptr %args, i32 {}",
@@ -164,10 +179,18 @@ impl CodeGen {
                 "  {} = load i64, ptr {}, align 8",
                 val_reg, ptr_reg
             ));
-            self.emit(&format!(
-                "  store i64 {}, ptr {}, align 8",
-                val_reg, alloca
-            ));
+            match &param.pattern {
+                BindingPattern::BindingIdentifier(id) => {
+                    let alloca = self.declare_var(id.name.as_str());
+                    self.emit(&format!(
+                        "  store i64 {}, ptr {}, align 8",
+                        val_reg, alloca
+                    ));
+                }
+                pattern => {
+                    self.emit_binding_pattern(pattern, &val_reg);
+                }
+            }
         }
 
         // Emit body
@@ -232,7 +255,7 @@ impl CodeGen {
         let result = self.fresh_reg();
         self.emit(&format!(
             "  {} = call i64 @js_func_new(ptr @{}, ptr {}, i32 {})",
-            result, fn_name, env_reg, param_names.len()
+            result, fn_name, env_reg, params.items.len()
         ));
         result
     }
