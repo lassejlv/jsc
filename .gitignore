@@ -1,3 +1,5 @@
 /target
 *.exe
 .claude/settings.local.json
+examples/**
+!examples/**/*.js

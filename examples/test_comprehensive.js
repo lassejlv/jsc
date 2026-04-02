@@ -25,13 +25,11 @@ function createPerson(name, age) {
 let people = [
   createPerson("Alice", 30),
   createPerson("Bob", 25),
-  createPerson("Charlie", 35)
+  createPerson("Charlie", 35),
 ];
 
 // Get names of people older than 27
-let olderPeople = people
-  .filter((p) => p.age > 27)
-  .map((p) => p.name);
+let olderPeople = people.filter((p) => p.age > 27).map((p) => p.name);
 console.log("People over 27: " + olderPeople.join(", "));
 
 // Recursive quicksort

@@ -18,6 +18,7 @@
 #include <windows.h>
 #else
 #include <sys/time.h>
+#define _strdup strdup
 #endif
 
 // ============================================================

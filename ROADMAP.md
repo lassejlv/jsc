@@ -1,82 +1,74 @@
 # Roadmap: Toward a Working JS Compiler
 
-Current state: compiles numeric expressions, functions, control flow, and `console.log` to native executables. Everything is `f64`. No heap, no strings-as-values, no objects.
+Current state: compiles JavaScript to native executables via LLVM IR. Has a full NaN-boxed dynamic type system, heap-allocated strings with 27+ methods, objects (hash maps), arrays with 20+ methods, closures, first-class functions, and a comprehensive C runtime library. Cross-platform (macOS, Linux, Windows).
 
-This roadmap outlines what's needed to support real-world JS patterns like `fetch()`, `prompt()`, string manipulation, arrays, and objects.
+This roadmap outlines what's been done and what's needed to support more real-world JS patterns like `fetch()`, async/await, modules, and more.
 
 ---
 
-## Phase 1: Dynamic Type System
+## Phase 1: Dynamic Type System ✅
 
-**The biggest blocker.** Right now every value is a `f64`. Real JS needs dynamic types.
+- [x] **Tagged value representation** — NaN-boxing: numbers as raw IEEE 754 doubles, booleans/null/undefined/strings/objects/arrays/functions encoded in NaN space
+- [x] **Runtime type checking** — Type checks before operations (e.g. `+` dispatches to addition vs string concatenation)
+- [x] **Type coercion** — JS coercion rules (`==` vs `===`, `"5" + 3 = "53"`, toNumber, toBoolean, toString)
+- [x] **Truthiness** — Proper truthy/falsy for all types (empty string, `null`, `undefined`, `0`, `NaN` are falsy)
 
-- [ ] **Tagged value representation** — Implement a runtime value type (NaN-boxing or tagged union struct) that can hold: `number`, `string`, `boolean`, `null`, `undefined`, `object pointer`
-- [ ] **Runtime type checking** — Emit type checks before operations (`+` on two numbers vs string concatenation)
-- [ ] **Type coercion** — Implement JS coercion rules (`==` vs `===`, `"5" + 3 = "53"`, etc.)
-- [ ] **Truthiness** — Proper truthy/falsy for all types (empty string, `null`, `undefined`, `0`, `NaN` are falsy)
+## Phase 2: Strings as Values ✅
 
-## Phase 2: Strings as Values
+- [x] **Heap-allocated strings** — `JSString` struct with reference counting
+- [x] **String concatenation** — `+` operator with string operands
+- [x] **String methods** — `.length`, `.charAt()`, `.charCodeAt()`, `.indexOf()`, `.includes()`, `.slice()`, `.substring()`, `.split()`, `.trim()`, `.toUpperCase()`, `.toLowerCase()`, `.replace()`, `.repeat()`, `.startsWith()`, `.endsWith()`, `.padStart()`, `.padEnd()`, and more (27+ methods)
+- [x] **Template literals** — `` `Hello ${name}` ``
+- [x] **String comparison** — `==`, `<`, `>` for strings
+- [x] **typeof operator** — Returns `"number"`, `"string"`, `"boolean"`, `"object"`, `"function"`, `"undefined"`
 
-Required for almost everything beyond math.
+## Phase 3: Memory Management ✅
 
-- [ ] **Heap-allocated strings** — Strings as reference-counted or GC'd heap objects
-- [ ] **String concatenation** — `+` operator with string operands
-- [ ] **String methods** — `.length`, `.slice()`, `.indexOf()`, `.includes()`, `.split()`, `.trim()`, `.toUpperCase()`, `.toLowerCase()`
-- [ ] **Template literals** — `` `Hello ${name}` ``
-- [ ] **String comparison** — `==`, `<`, `>` for strings
-- [ ] **typeof operator** — Returns string like `"number"`, `"string"`, `"object"`, etc.
+- [x] **Reference counting** — `JSString` has refcount, freed when count hits 0
+- [ ] **Cycle-safe GC** — Mark-and-sweep garbage collector (for circular references)
+- [x] **Runtime allocator** — C runtime library (`runtime.c`) linked into every compiled program, uses malloc/free
 
-## Phase 3: Memory Management
+## Phase 4: Objects and Arrays (mostly done)
 
-Once we have heap-allocated values, we need to manage memory.
-
-- [ ] **Reference counting** — Simplest approach; add refcount to heap objects, free when count hits 0
-- [ ] **Or: simple GC** — Mark-and-sweep garbage collector (more correct for cycles, more complex)
-- [ ] **Runtime allocator** — Small runtime library (in C or Rust) linked into compiled programs that handles `malloc`/`free`/GC
-
-## Phase 4: Objects and Arrays
-
-Core JS data structures.
-
-- [ ] **Object literals** — `{ key: value }` as hash maps
-- [ ] **Property access** — `obj.key` and `obj["key"]`
-- [ ] **Property assignment** — `obj.key = value`
-- [ ] **Arrays** — `[1, 2, 3]` with dynamic resizing
-- [ ] **Array methods** — `.push()`, `.pop()`, `.length`, `.map()`, `.filter()`, `.forEach()`, `.reduce()`, `.join()`
-- [ ] **for...of loops** — Iterate over arrays
+- [x] **Object literals** — `{ key: value }` as hash maps (FNV-1a hashing, linear probing)
+- [x] **Property access** — `obj.key` and `obj["key"]`
+- [x] **Property assignment** — `obj.key = value` and `obj["key"] = value`
+- [x] **Arrays** — `[1, 2, 3]` with dynamic resizing
+- [x] **Array methods** — `.push()`, `.pop()`, `.shift()`, `.unshift()`, `.length`, `.indexOf()`, `.includes()`, `.join()`, `.reverse()`, `.slice()`, `.concat()`, `.map()`, `.filter()`, `.forEach()`, `.reduce()`, `.find()`, `.findIndex()`, `.every()`, `.some()`, `.flat()`
+- [x] **for...of loops** — Iterate over arrays
 - [ ] **Spread operator** — `[...arr]`, `{...obj}`
 - [ ] **Destructuring** — `const { a, b } = obj`, `const [x, y] = arr`
-- [ ] **JSON.stringify / JSON.parse**
+- [x] **JSON.stringify** — Implemented
+- [ ] **JSON.parse** — Not yet implemented
+- [x] **Object.keys() / Object.values()** — Implemented
+- [x] **Array.isArray()** — Implemented
 
-## Phase 5: Closures and First-Class Functions
+## Phase 5: Closures and First-Class Functions (mostly done)
 
-JS functions capture their environment.
-
-- [ ] **Function expressions** — `const add = function(a, b) { return a + b; }`
-- [ ] **Arrow functions** — `(a, b) => a + b`
-- [ ] **Closures** — Capture variables from enclosing scope (requires heap-allocated activation records)
-- [ ] **Callbacks** — Pass functions as arguments
-- [ ] **Higher-order functions** — Functions returning functions
+- [x] **Function expressions** — `const add = function(a, b) { return a + b; }`
+- [x] **Arrow functions** — `(a, b) => a + b`
+- [x] **Closures** — Capture variables from enclosing scope by value into heap-allocated closure environment
+- [x] **Callbacks** — Pass functions as arguments
+- [x] **Higher-order functions** — Functions returning functions
 - [ ] **`this` binding** — Basic `this` semantics (at least for method calls)
 
-## Phase 6: Error Handling
+## Phase 6: Error Handling (partial)
 
-- [ ] **try / catch / finally** — Implement using LLVM's exception handling or setjmp/longjmp
-- [ ] **throw** — Throw any value
-- [ ] **Error objects** — `new Error("message")` with `.message` and `.stack`
+- [ ] **try / catch / finally** — Partial: try body executes, catch/finally not yet wired up (setjmp/longjmp plumbing exists in runtime)
+- [x] **throw** — Throw any value (implemented via setjmp/longjmp)
+- [x] **Error objects** — `new Error("message")` with `.message`
+- [ ] **Stack traces** — `.stack` property on Error objects
 
 ## Phase 7: Built-in Functions and I/O Runtime
 
-This is where `prompt()`, `fetch()`, etc. come in. These require a **runtime library** linked into every compiled program.
-
-### Synchronous built-ins
-- [ ] **prompt(message)** — Read line from stdin (link to C `fgets` or Rust `std::io::stdin`)
-- [ ] **parseInt() / parseFloat()** — String to number conversion
-- [ ] **Math object** — `Math.floor`, `Math.ceil`, `Math.round`, `Math.random`, `Math.sqrt`, `Math.pow`, `Math.abs`, `Math.min`, `Math.max`, `Math.PI`
-- [ ] **String() / Number() / Boolean()** — Type conversion functions
-- [ ] **isNaN() / isFinite()**
-- [ ] **console.error()** — Print to stderr
-- [ ] **Date.now()** — Millisecond timestamp
+### Synchronous built-ins ✅
+- [x] **prompt(message)** — Read line from stdin
+- [x] **parseInt() / parseFloat()** — String to number conversion
+- [x] **Math object** — `Math.floor`, `Math.ceil`, `Math.round`, `Math.random`, `Math.sqrt`, `Math.pow`, `Math.abs`, `Math.min`, `Math.max`, `Math.PI`, `Math.E`, `Math.LN2`, `Math.LN10`, `Math.SQRT2`, `Math.LOG2E`, `Math.LOG10E`, `Math.sin`, `Math.cos`, `Math.tan`, `Math.atan2`, `Math.exp`, `Math.trunc`, `Math.sign`, `Math.log`, `Math.log2`, `Math.log10`
+- [x] **String() / Number() / Boolean()** — Type conversion functions
+- [x] **isNaN() / isFinite()**
+- [x] **console.error()** — Print to stderr
+- [x] **Date.now()** — Millisecond timestamp
 
 ### Async built-ins (requires Phase 8 first)
 - [ ] **setTimeout / setInterval** — Timer-based callbacks
@@ -107,43 +99,32 @@ Required for `fetch()` and modern JS patterns. This is the hardest phase.
 - [ ] **Source maps** — Map compiled code back to JS source for debugging
 - [ ] **Better error messages** — Line numbers and context in compile errors
 - [ ] **Tail call optimization** — For recursive functions
-- [ ] **Cross-platform** — macOS and Linux support (currently Windows-only)
+- [x] **Cross-platform** — macOS, Linux, and Windows support
 - [ ] **Test suite** — Automated test runner against expected outputs
 - [ ] **Benchmarks** — Compare performance vs Node.js / Bun / Deno
 
 ---
 
-## Suggested implementation order
+## What's left
 
-```
-Phase 1 (types)  ─→  Phase 2 (strings)  ─→  Phase 3 (memory)
-                                                    │
-                 Phase 5 (closures)  ←──────────────┤
-                                                    │
-                 Phase 4 (objects/arrays)  ←─────────┘
-                        │
-                 Phase 6 (errors)
-                        │
-                 Phase 7 sync builtins (prompt, Math, etc.)
-                        │
-                 Phase 8 (async/await)
-                        │
-                 Phase 7 async builtins (fetch, timers)
-                        │
-                 Phase 9 (modules)  →  Phase 10 (polish)
-```
-
-**The critical path is Phase 1 → 2 → 3.** Once you have a dynamic type system with heap-allocated strings and memory management, everything else builds on top incrementally.
+The big remaining items are:
+1. **Spread / destructuring** (Phase 4) — Quality-of-life syntax features
+2. **try/catch wiring** (Phase 6) — Runtime has setjmp/longjmp, codegen needs to emit the proper catch blocks
+3. **`this` binding** (Phase 5) — Needed for OOP patterns
+4. **Async/await** (Phase 8) — The hardest remaining phase, needed for modern JS
+5. **Modules** (Phase 9) — Multi-file programs
 
 ## Architecture note: the runtime library
 
-Phases 3+ require a **runtime library** — a small C or Rust library compiled to a static `.lib`/`.a` that gets linked into every compiled JS program. It would provide:
+The runtime library (`runtime/runtime.c`, ~1,200 lines of C) is already in place and provides:
 
-- Memory allocator / garbage collector
-- Tagged value operations (type checks, coercion)
-- Built-in function implementations (prompt, fetch, Math, etc.)
-- String operations
-- Object/array hash map implementation
-- Event loop (for async)
+- NaN-boxed value representation and type operations
+- Reference-counted string allocation
+- Object hash map implementation (FNV-1a hashing, linear probing)
+- Dynamic arrays with 20+ methods
+- Closure/function value support
+- Error handling via setjmp/longjmp
+- All synchronous built-in functions (Math, console, Date, JSON, etc.)
+- Cross-platform support (Windows via `_strdup`/`GetSystemTimeAsFileTime`, POSIX via `strdup`/`gettimeofday`)
 
-This is similar to how Go, Zig, and other compiled languages ship a runtime. The compiler emits calls to runtime functions, and the runtime handles the complex parts.
+This is compiled alongside the generated LLVM IR by clang into the final native executable.
