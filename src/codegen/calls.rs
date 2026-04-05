@@ -4,6 +4,11 @@ use super::{CodeGen, JS_UNDEF};
 
 impl CodeGen {
     pub(crate) fn emit_call(&mut self, expr: &CallExpression<'_>) -> String {
+        // super() call in constructor — handled by emit_new_class, so skip
+        if matches!(&expr.callee, Expression::Super(_)) {
+            return format!("{}", JS_UNDEF);
+        }
+
         // Detect special calls
         if let Some(result) = self.try_emit_builtin_call(expr) {
             return result;
@@ -12,6 +17,36 @@ impl CodeGen {
         // Method call: obj.method(args)
         if let Expression::StaticMemberExpression(sme) = &expr.callee {
             return self.emit_method_call(sme, &expr.arguments);
+        }
+
+        // Private field method call: this.#method(args)
+        if let Expression::PrivateFieldExpression(pfe) = &expr.callee {
+            let obj = self.emit_expression(&pfe.object);
+            let method_name = format!("__priv_{}", pfe.field.name.as_str());
+            let method_global = self.intern_string(&method_name);
+
+            let argc = expr.arguments.len();
+            let args_alloca = self.fresh_reg();
+            self.emit(&format!(
+                "  {} = alloca i64, i32 {}",
+                args_alloca,
+                if argc == 0 { 1 } else { argc }
+            ));
+            for (i, arg) in expr.arguments.iter().enumerate() {
+                let val = self.emit_call_arg(arg);
+                let ptr = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = getelementptr i64, ptr {}, i32 {}",
+                    ptr, args_alloca, i
+                ));
+                self.emit(&format!("  store i64 {}, ptr {}, align 8", val, ptr));
+            }
+            let result = self.fresh_reg();
+            self.emit(&format!(
+                "  {} = call i64 @js_call_method(i64 {}, ptr {}, ptr {}, i32 {})",
+                result, obj, method_global, args_alloca, argc
+            ));
+            return result;
         }
 
         // Direct call to known function
@@ -23,8 +58,7 @@ impl CodeGen {
                 for arg in &expr.arguments {
                     arg_regs.push(self.emit_call_arg(arg));
                 }
-                let params: Vec<String> =
-                    arg_regs.iter().map(|r| format!("i64 {}", r)).collect();
+                let params: Vec<String> = arg_regs.iter().map(|r| format!("i64 {}", r)).collect();
                 let result = self.fresh_reg();
                 self.emit(&format!(
                     "  {} = call i64 @{}({})",
@@ -50,29 +84,66 @@ impl CodeGen {
         self.emit_indirect_call(&func_val, &expr.arguments)
     }
 
-    pub(crate) fn emit_indirect_call(&mut self, func_val: &str, arguments: &[Argument<'_>]) -> String {
-        let argc = arguments.len();
-        let args_alloca = self.fresh_reg();
-        self.emit(&format!(
-            "  {} = alloca i64, i32 {}",
-            args_alloca,
-            if argc == 0 { 1 } else { argc }
-        ));
-        for (i, arg) in arguments.iter().enumerate() {
-            let val = self.emit_call_arg(arg);
-            let ptr = self.fresh_reg();
+    pub(crate) fn emit_indirect_call(
+        &mut self,
+        func_val: &str,
+        arguments: &[Argument<'_>],
+    ) -> String {
+        // Check if any argument is a SpreadElement
+        let has_spread = arguments
+            .iter()
+            .any(|a| matches!(a, Argument::SpreadElement(_)));
+
+        if has_spread {
+            // Build args dynamically using a temp array
+            let arr = self.fresh_reg();
+            self.emit(&format!("  {} = call i64 @js_array_new()", arr));
+            for arg in arguments {
+                if let Argument::SpreadElement(spread) = arg {
+                    let src = self.emit_expression(&spread.argument);
+                    self.emit(&format!(
+                        "  call void @js_array_concat_into(i64 {}, i64 {})",
+                        arr, src
+                    ));
+                } else {
+                    let val = self.emit_call_arg(arg);
+                    self.emit(&format!(
+                        "  call i64 @js_array_push_val(i64 {}, i64 {})",
+                        arr, val
+                    ));
+                }
+            }
+            // Get array data ptr and length
+            let result = self.fresh_reg();
             self.emit(&format!(
-                "  {} = getelementptr i64, ptr {}, i32 {}",
-                ptr, args_alloca, i
+                "  {} = call i64 @js_call_func_spread(i64 {}, i64 {})",
+                result, func_val, arr
             ));
-            self.emit(&format!("  store i64 {}, ptr {}, align 8", val, ptr));
+            result
+        } else {
+            let argc = arguments.len();
+            let args_alloca = self.fresh_reg();
+            self.emit(&format!(
+                "  {} = alloca i64, i32 {}",
+                args_alloca,
+                if argc == 0 { 1 } else { argc }
+            ));
+            for (i, arg) in arguments.iter().enumerate() {
+                let val = self.emit_call_arg(arg);
+                let ptr = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = getelementptr i64, ptr {}, i32 {}",
+                    ptr, args_alloca, i
+                ));
+                self.emit(&format!("  store i64 {}, ptr {}, align 8", val, ptr));
+            }
+            let result = self.fresh_reg();
+            self.emit(&format!(
+                "  {} = call i64 @js_call_func(i64 {}, ptr {}, i32 {})",
+                result, func_val, args_alloca, argc
+            ));
+            result
         }
-        let result = self.fresh_reg();
-        self.emit(&format!(
-            "  {} = call i64 @js_call_func(i64 {}, ptr {}, i32 {})",
-            result, func_val, args_alloca, argc
-        ));
-        result
     }
 
     /// Try to emit a built-in function call. Returns Some(reg) if handled.
@@ -92,6 +163,48 @@ impl CodeGen {
                     return self.emit_math_call(method, &expr.arguments);
                 }
 
+                // JSC.serve()
+                if obj_name == "JSC" && method == "serve" {
+                    let arg = self.emit_call_arg(&expr.arguments[0]);
+                    let r = self.fresh_reg();
+                    self.emit(&format!("  {} = call i64 @js_serve(i64 {})", r, arg));
+                    return Some(r);
+                }
+
+                // Response static methods
+                if obj_name == "Response" && method == "json" {
+                    let data = if expr.arguments.is_empty() {
+                        format!("{}", JS_UNDEF)
+                    } else {
+                        self.emit_call_arg(&expr.arguments[0])
+                    };
+                    let init = if expr.arguments.len() >= 2 {
+                        self.emit_call_arg(&expr.arguments[1])
+                    } else {
+                        format!("{}", JS_UNDEF)
+                    };
+                    let r = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_response_json(i64 {}, i64 {})",
+                        r, data, init
+                    ));
+                    return Some(r);
+                }
+                if obj_name == "Response" && method == "redirect" {
+                    let url = self.emit_call_arg(&expr.arguments[0]);
+                    let status = if expr.arguments.len() >= 2 {
+                        self.emit_call_arg(&expr.arguments[1])
+                    } else {
+                        format!("{}", JS_UNDEF)
+                    };
+                    let r = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_response_redirect(i64 {}, i64 {})",
+                        r, url, status
+                    ));
+                    return Some(r);
+                }
+
                 // Promise static methods
                 if obj_name == "Promise" {
                     let func = match method {
@@ -109,10 +222,7 @@ impl CodeGen {
                             self.emit_call_arg(&expr.arguments[0])
                         };
                         let r = self.fresh_reg();
-                        self.emit(&format!(
-                            "  {} = call i64 @{}(i64 {})",
-                            r, func, arg
-                        ));
+                        self.emit(&format!("  {} = call i64 @{}(i64 {})", r, func, arg));
                         return Some(r);
                     }
                 }
@@ -132,10 +242,7 @@ impl CodeGen {
                         self.emit_call_arg(&expr.arguments[0])
                     };
                     let r = self.fresh_reg();
-                    self.emit(&format!(
-                        "  {} = call i64 @js_json_parse(i64 {})",
-                        r, arg
-                    ));
+                    self.emit(&format!("  {} = call i64 @js_json_parse(i64 {})", r, arg));
                     return Some(r);
                 }
 
@@ -162,10 +269,7 @@ impl CodeGen {
                         self.emit_call_arg(&expr.arguments[0])
                     };
                     let r = self.fresh_reg();
-                    self.emit(&format!(
-                        "  {} = call i64 @js_object_keys(i64 {})",
-                        r, arg
-                    ));
+                    self.emit(&format!("  {} = call i64 @js_object_keys(i64 {})", r, arg));
                     return Some(r);
                 }
                 if obj_name == "Object" && method == "entries" {
@@ -192,6 +296,26 @@ impl CodeGen {
                     }
                     return Some(target);
                 }
+                if obj_name == "Object" && method == "create" {
+                    // Object.create(proto) — in this runtime objects have no prototype chain,
+                    // so Object.create(null) and Object.create({}) both just return a new object
+                    let r = self.fresh_reg();
+                    self.emit(&format!("  {} = call i64 @js_object_new()", r));
+                    return Some(r);
+                }
+                if obj_name == "Object" && method == "fromEntries" {
+                    let arg = if expr.arguments.is_empty() {
+                        format!("{}", JS_UNDEF)
+                    } else {
+                        self.emit_call_arg(&expr.arguments[0])
+                    };
+                    let r = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_object_from_entries(i64 {})",
+                        r, arg
+                    ));
+                    return Some(r);
+                }
                 if obj_name == "Object" && method == "values" {
                     let arg = if expr.arguments.is_empty() {
                         format!("{}", JS_UNDEF)
@@ -214,10 +338,7 @@ impl CodeGen {
                         self.emit_call_arg(&expr.arguments[0])
                     };
                     let r = self.fresh_reg();
-                    self.emit(&format!(
-                        "  {} = call i64 @js_array_from(i64 {})",
-                        r, arg
-                    ));
+                    self.emit(&format!("  {} = call i64 @js_array_from(i64 {})", r, arg));
                     return Some(r);
                 }
 
@@ -253,7 +374,11 @@ impl CodeGen {
                     } else {
                         format!("{}", super::js_number_bits(0.0))
                     };
-                    let func = if name == "setTimeout" { "js_set_timeout" } else { "js_set_interval" };
+                    let func = if name == "setTimeout" {
+                        "js_set_timeout"
+                    } else {
+                        "js_set_interval"
+                    };
                     let r = self.fresh_reg();
                     self.emit(&format!(
                         "  {} = call i64 @{}(i64 {}, i64 {})",
@@ -268,10 +393,7 @@ impl CodeGen {
                         self.emit_call_arg(&expr.arguments[0])
                     };
                     let r = self.fresh_reg();
-                    self.emit(&format!(
-                        "  {} = call i64 @js_clear_timeout(i64 {})",
-                        r, id
-                    ));
+                    self.emit(&format!("  {} = call i64 @js_clear_timeout(i64 {})", r, id));
                     return Some(r);
                 }
                 "fetch" => {
@@ -327,10 +449,7 @@ impl CodeGen {
                         self.emit_call_arg(&expr.arguments[0])
                     };
                     let r = self.fresh_reg();
-                    self.emit(&format!(
-                        "  {} = call i64 @js_parse_float(i64 {})",
-                        r, arg
-                    ));
+                    self.emit(&format!("  {} = call i64 @js_parse_float(i64 {})", r, arg));
                     return Some(r);
                 }
                 "isNaN" => {

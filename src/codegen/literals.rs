@@ -14,9 +14,7 @@ impl CodeGen {
                         PropertyKey::StaticIdentifier(id) => {
                             self.emit_string_const(id.name.as_str())
                         }
-                        PropertyKey::StringLiteral(s) => {
-                            self.emit_string_const(s.value.as_str())
-                        }
+                        PropertyKey::StringLiteral(s) => self.emit_string_const(s.value.as_str()),
                         PropertyKey::NumericLiteral(n) => {
                             let s = format!("{}", n.value);
                             self.emit_string_const(&s)
@@ -114,9 +112,7 @@ impl CodeGen {
     pub(crate) fn emit_template_literal(&mut self, tl: &TemplateLiteral<'_>) -> String {
         // Start with the first quasi
         let first_quasi = &tl.quasis[0];
-        let mut result = self.emit_string_const(
-            first_quasi.value.raw.as_str(),
-        );
+        let mut result = self.emit_string_const(first_quasi.value.raw.as_str());
 
         // Alternate: expression, quasi, expression, quasi, ...
         for (i, expr) in tl.expressions.iter().enumerate() {

@@ -20,12 +20,18 @@ impl CodeGen {
                     "undefined" => return format!("{}", JS_UNDEF),
                     "NaN" => return format!("{}", js_number_bits(f64::NAN)),
                     "Infinity" => return format!("{}", js_number_bits(f64::INFINITY)),
+                    "globalThis" | "self" | "window" => return format!("{}", JS_UNDEF),
                     _ => {}
                 }
-                let alloca = self.lookup_var(id.name.as_str()).to_string();
-                let reg = self.fresh_reg();
-                self.emit(&format!("  {} = load i64, ptr {}, align 8", reg, alloca));
-                reg
+                if let Some(alloca) = self.try_lookup_var(id.name.as_str()) {
+                    let alloca = alloca.to_string();
+                    let reg = self.fresh_reg();
+                    self.emit(&format!("  {} = load i64, ptr {}, align 8", reg, alloca));
+                    reg
+                } else {
+                    // Unknown global — return undefined instead of crashing
+                    format!("{}", JS_UNDEF)
+                }
             }
             Expression::BinaryExpression(be) => self.emit_binary(be),
             Expression::UnaryExpression(ue) => self.emit_unary(ue),
@@ -61,6 +67,28 @@ impl CodeGen {
                     last = self.emit_expression(expr);
                 }
                 last
+            }
+            Expression::ClassExpression(cls) => self.emit_class_expr(cls),
+            Expression::RegExpLiteral(re) => {
+                let pattern = self.emit_string_const(re.regex.pattern.text.as_str());
+                let flags = self.emit_string_const(&re.regex.flags.to_string());
+                let reg = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = call i64 @js_regexp_new(i64 {}, i64 {})",
+                    reg, pattern, flags
+                ));
+                reg
+            }
+            Expression::PrivateFieldExpression(pfe) => {
+                let obj = self.emit_expression(&pfe.object);
+                let name = format!("__priv_{}", pfe.field.name.as_str());
+                let key = self.emit_string_const(&name);
+                let result = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
+                    result, obj, key
+                ));
+                result
             }
             Expression::ChainExpression(ce) => self.emit_chain(&ce.expression),
             // TypeScript: strip type assertions, just emit the inner expression
@@ -120,10 +148,7 @@ impl CodeGen {
         if expr.operator == UnaryOperator::Typeof {
             let val = self.emit_expression(&expr.argument);
             let reg = self.fresh_reg();
-            self.emit(&format!(
-                "  {} = call i64 @js_typeof_val(i64 {})",
-                reg, val
-            ));
+            self.emit(&format!("  {} = call i64 @js_typeof_val(i64 {})", reg, val));
             return reg;
         }
         if expr.operator == UnaryOperator::Void {
@@ -234,30 +259,42 @@ impl CodeGen {
     }
 
     pub(crate) fn emit_assignment(&mut self, expr: &AssignmentExpression<'_>) -> String {
+        // Handle logical assignment operators (||=, &&=, ??=) with short-circuit branching
+        let is_logical = matches!(
+            expr.operator,
+            AssignmentOperator::LogicalOr
+                | AssignmentOperator::LogicalAnd
+                | AssignmentOperator::LogicalNullish
+        );
+        if is_logical {
+            return self.emit_logical_assignment(expr);
+        }
+
         // For compound assignments, compute the new value from old + right
-        let compute_compound = |cg: &mut Self, old_val: &str, right_val: &str, op: &AssignmentOperator| -> String {
-            let func = match op {
-                AssignmentOperator::Addition => "js_add",
-                AssignmentOperator::Subtraction => "js_sub",
-                AssignmentOperator::Multiplication => "js_mul",
-                AssignmentOperator::Division => "js_div",
-                AssignmentOperator::Remainder => "js_mod",
-                AssignmentOperator::Exponential => "js_math_pow",
-                AssignmentOperator::BitwiseAnd => "js_bitand",
-                AssignmentOperator::BitwiseOR => "js_bitor",
-                AssignmentOperator::BitwiseXOR => "js_bitxor",
-                AssignmentOperator::ShiftLeft => "js_shl",
-                AssignmentOperator::ShiftRight => "js_shr",
-                AssignmentOperator::ShiftRightZeroFill => "js_ushr",
-                _ => return right_val.to_string(), // logical assign handled separately
+        let compute_compound =
+            |cg: &mut Self, old_val: &str, right_val: &str, op: &AssignmentOperator| -> String {
+                let func = match op {
+                    AssignmentOperator::Addition => "js_add",
+                    AssignmentOperator::Subtraction => "js_sub",
+                    AssignmentOperator::Multiplication => "js_mul",
+                    AssignmentOperator::Division => "js_div",
+                    AssignmentOperator::Remainder => "js_mod",
+                    AssignmentOperator::Exponential => "js_math_pow",
+                    AssignmentOperator::BitwiseAnd => "js_bitand",
+                    AssignmentOperator::BitwiseOR => "js_bitor",
+                    AssignmentOperator::BitwiseXOR => "js_bitxor",
+                    AssignmentOperator::ShiftLeft => "js_shl",
+                    AssignmentOperator::ShiftRight => "js_shr",
+                    AssignmentOperator::ShiftRightZeroFill => "js_ushr",
+                    _ => return right_val.to_string(),
+                };
+                let r = cg.fresh_reg();
+                cg.emit(&format!(
+                    "  {} = call i64 @{}(i64 {}, i64 {})",
+                    r, func, old_val, right_val
+                ));
+                r
             };
-            let r = cg.fresh_reg();
-            cg.emit(&format!(
-                "  {} = call i64 @{}(i64 {}, i64 {})",
-                r, func, old_val, right_val
-            ));
-            r
-        };
 
         let is_simple = expr.operator == AssignmentOperator::Assign;
 
@@ -315,10 +352,168 @@ impl CodeGen {
                 ));
                 val
             }
+            AssignmentTarget::PrivateFieldExpression(pfe) => {
+                let obj = self.emit_expression(&pfe.object);
+                let prop_name = format!("__priv_{}", pfe.field.name.as_str());
+                let key = self.emit_string_const(&prop_name);
+                let val = if is_simple {
+                    self.emit_expression(&expr.right)
+                } else {
+                    let old = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
+                        old, obj, key
+                    ));
+                    let right = self.emit_expression(&expr.right);
+                    compute_compound(self, &old, &right, &expr.operator)
+                };
+                self.emit(&format!(
+                    "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                    obj, key, val
+                ));
+                val
+            }
             _ => {
                 // Unsupported target
                 self.emit_expression(&expr.right)
             }
+        }
+    }
+
+    /// Emit logical assignment: x ||= y, x &&= y, x ??= y
+    /// These have short-circuit semantics — the RHS is only evaluated if the condition is met.
+    fn emit_logical_assignment(&mut self, expr: &AssignmentExpression<'_>) -> String {
+        // Helper: read old value, emit branch, evaluate RHS and store if needed
+        // Returns the final value (phi of old/new)
+        match &expr.left {
+            AssignmentTarget::AssignmentTargetIdentifier(id) => {
+                let alloca = self.lookup_var(id.name.as_str()).to_string();
+                let old = self.fresh_reg();
+                self.emit(&format!("  {} = load i64, ptr {}, align 8", old, alloca));
+                let old_block = self.current_block.clone();
+
+                let assign_label = self.fresh_label("logassign.do");
+                let end_label = self.fresh_label("logassign.end");
+
+                self.emit_logical_assign_branch(&old, &expr.operator, &assign_label, &end_label);
+
+                self.emit_label(&assign_label);
+                let new_val = self.emit_expression(&expr.right);
+                self.emit(&format!("  store i64 {}, ptr {}, align 8", new_val, alloca));
+                let assign_block = self.current_block.clone();
+                self.emit_br(&end_label);
+
+                self.emit_label(&end_label);
+                let result = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = phi i64 [ {}, %{} ], [ {}, %{} ]",
+                    result, old, old_block, new_val, assign_block
+                ));
+                result
+            }
+            AssignmentTarget::StaticMemberExpression(sme) => {
+                let obj = self.emit_expression(&sme.object);
+                let key = self.emit_string_const(sme.property.name.as_str());
+                let old = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
+                    old, obj, key
+                ));
+                let old_block = self.current_block.clone();
+
+                let assign_label = self.fresh_label("logassign.do");
+                let end_label = self.fresh_label("logassign.end");
+
+                self.emit_logical_assign_branch(&old, &expr.operator, &assign_label, &end_label);
+
+                self.emit_label(&assign_label);
+                let new_val = self.emit_expression(&expr.right);
+                self.emit(&format!(
+                    "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                    obj, key, new_val
+                ));
+                let assign_block = self.current_block.clone();
+                self.emit_br(&end_label);
+
+                self.emit_label(&end_label);
+                let result = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = phi i64 [ {}, %{} ], [ {}, %{} ]",
+                    result, old, old_block, new_val, assign_block
+                ));
+                result
+            }
+            AssignmentTarget::PrivateFieldExpression(pfe) => {
+                let obj = self.emit_expression(&pfe.object);
+                let prop_name = format!("__priv_{}", pfe.field.name.as_str());
+                let key = self.emit_string_const(&prop_name);
+                let old = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
+                    old, obj, key
+                ));
+                let old_block = self.current_block.clone();
+
+                let assign_label = self.fresh_label("logassign.do");
+                let end_label = self.fresh_label("logassign.end");
+
+                self.emit_logical_assign_branch(&old, &expr.operator, &assign_label, &end_label);
+
+                self.emit_label(&assign_label);
+                let new_val = self.emit_expression(&expr.right);
+                self.emit(&format!(
+                    "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                    obj, key, new_val
+                ));
+                let assign_block = self.current_block.clone();
+                self.emit_br(&end_label);
+
+                self.emit_label(&end_label);
+                let result = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = phi i64 [ {}, %{} ], [ {}, %{} ]",
+                    result, old, old_block, new_val, assign_block
+                ));
+                result
+            }
+            _ => self.emit_expression(&expr.right),
+        }
+    }
+
+    /// Emit the conditional branch for logical assignment operators
+    fn emit_logical_assign_branch(
+        &mut self,
+        old_val: &str,
+        op: &AssignmentOperator,
+        assign_label: &str,
+        end_label: &str,
+    ) {
+        match op {
+            AssignmentOperator::LogicalOr => {
+                // ||= : assign if old is falsy
+                let old_bool = self.to_bool(old_val);
+                self.emit_cond_br(&old_bool, end_label, assign_label);
+            }
+            AssignmentOperator::LogicalAnd => {
+                // &&= : assign if old is truthy
+                let old_bool = self.to_bool(old_val);
+                self.emit_cond_br(&old_bool, assign_label, end_label);
+            }
+            AssignmentOperator::LogicalNullish => {
+                // ??= : assign if old is null or undefined
+                let nullish_i32 = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = call i32 @js_is_nullish(i64 {})",
+                    nullish_i32, old_val
+                ));
+                let is_nullish = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = trunc i32 {} to i1",
+                    is_nullish, nullish_i32
+                ));
+                self.emit_cond_br(&is_nullish, assign_label, end_label);
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -439,46 +634,90 @@ impl CodeGen {
     }
 
     pub(crate) fn emit_update(&mut self, expr: &UpdateExpression<'_>) -> String {
-        let var_name = match &expr.argument {
-            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
-                id.name.as_str().to_string()
-            }
-            _ => panic!("unsupported update target"),
-        };
-
-        let alloca = self.lookup_var(&var_name).to_string();
-        let old_val = self.fresh_reg();
-        self.emit(&format!(
-            "  {} = load i64, ptr {}, align 8",
-            old_val, alloca
-        ));
-
-        let one = js_number_bits(1.0);
-        let new_val = self.fresh_reg();
         let func = match expr.operator {
             UpdateOperator::Increment => "js_add",
             UpdateOperator::Decrement => "js_sub",
         };
-        self.emit(&format!(
-            "  {} = call i64 @{}(i64 {}, i64 {})",
-            new_val, func, old_val, one
-        ));
+        let one = js_number_bits(1.0);
 
-        self.emit(&format!(
-            "  store i64 {}, ptr {}, align 8",
-            new_val, alloca
-        ));
-
-        if expr.prefix {
-            new_val
-        } else {
-            old_val
+        match &expr.argument {
+            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
+                let alloca = self.lookup_var(id.name.as_str());
+                let old_val = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = load i64, ptr {}, align 8",
+                    old_val, alloca
+                ));
+                let new_val = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = call i64 @{}(i64 {}, i64 {})",
+                    new_val, func, old_val, one
+                ));
+                self.emit(&format!("  store i64 {}, ptr {}, align 8", new_val, alloca));
+                if expr.prefix {
+                    new_val
+                } else {
+                    old_val
+                }
+            }
+            SimpleAssignmentTarget::StaticMemberExpression(sme) => {
+                let obj = self.emit_expression(&sme.object);
+                let key = self.emit_string_const(sme.property.name.as_str());
+                let old_val = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
+                    old_val, obj, key
+                ));
+                let new_val = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = call i64 @{}(i64 {}, i64 {})",
+                    new_val, func, old_val, one
+                ));
+                self.emit(&format!(
+                    "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                    obj, key, new_val
+                ));
+                if expr.prefix {
+                    new_val
+                } else {
+                    old_val
+                }
+            }
+            SimpleAssignmentTarget::ComputedMemberExpression(cme) => {
+                let obj = self.emit_expression(&cme.object);
+                let key = self.emit_expression(&cme.expression);
+                let old_val = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = call i64 @js_get_prop(i64 {}, i64 {})",
+                    old_val, obj, key
+                ));
+                let new_val = self.fresh_reg();
+                self.emit(&format!(
+                    "  {} = call i64 @{}(i64 {}, i64 {})",
+                    new_val, func, old_val, one
+                ));
+                self.emit(&format!(
+                    "  call void @js_set_prop(i64 {}, i64 {}, i64 {})",
+                    obj, key, new_val
+                ));
+                if expr.prefix {
+                    new_val
+                } else {
+                    old_val
+                }
+            }
+            _ => format!("{}", JS_UNDEF),
         }
     }
 
     pub(crate) fn emit_new(&mut self, ne: &NewExpression<'_>) -> String {
         if let Expression::Identifier(id) = &ne.callee {
-            match id.name.as_str() {
+            let name = id.name.as_str();
+            // Check if it's a known class
+            if self.class_info.contains_key(name) {
+                return self.emit_new_class(name, &ne.arguments);
+            }
+            match name {
                 "Error" => {
                     let obj = self.fresh_reg();
                     self.emit(&format!("  {} = call i64 @js_object_new()", obj));
@@ -499,6 +738,93 @@ impl CodeGen {
                         obj, msg_key, msg_val
                     ));
                     return obj;
+                }
+                "Response" => {
+                    let body = if ne.arguments.is_empty() {
+                        format!("{}", JS_UNDEF)
+                    } else {
+                        self.emit_call_arg(&ne.arguments[0])
+                    };
+                    let init = if ne.arguments.len() >= 2 {
+                        self.emit_call_arg(&ne.arguments[1])
+                    } else {
+                        format!("{}", JS_UNDEF)
+                    };
+                    let r = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_response_new(i64 {}, i64 {})",
+                        r, body, init
+                    ));
+                    return r;
+                }
+                "Request" => {
+                    let url = if ne.arguments.is_empty() {
+                        format!("{}", JS_UNDEF)
+                    } else {
+                        self.emit_call_arg(&ne.arguments[0])
+                    };
+                    let init = if ne.arguments.len() >= 2 {
+                        self.emit_call_arg(&ne.arguments[1])
+                    } else {
+                        format!("{}", JS_UNDEF)
+                    };
+                    let r = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_request_new(i64 {}, i64 {})",
+                        r, url, init
+                    ));
+                    return r;
+                }
+                "Headers" => {
+                    let init = if ne.arguments.is_empty() {
+                        format!("{}", JS_UNDEF)
+                    } else {
+                        self.emit_call_arg(&ne.arguments[0])
+                    };
+                    let r = self.fresh_reg();
+                    self.emit(&format!("  {} = call i64 @js_headers_new(i64 {})", r, init));
+                    return r;
+                }
+                "URL" => {
+                    let url = if ne.arguments.is_empty() {
+                        self.emit_string_const("")
+                    } else {
+                        self.emit_call_arg(&ne.arguments[0])
+                    };
+                    // js_url_new takes a C string, but we have a JSValue
+                    // Convert: extract cstring, call, then we need a wrapper
+                    // Simplest: make a runtime wrapper that takes JSValue
+                    let r = self.fresh_reg();
+                    self.emit(&format!("  {} = call i64 @js_url_new_val(i64 {})", r, url));
+                    return r;
+                }
+                "Map" => {
+                    let r = self.fresh_reg();
+                    self.emit(&format!("  {} = call i64 @js_map_new()", r));
+                    return r;
+                }
+                "Set" => {
+                    let r = self.fresh_reg();
+                    self.emit(&format!("  {} = call i64 @js_set_new()", r));
+                    return r;
+                }
+                "RegExp" => {
+                    let pattern = if ne.arguments.is_empty() {
+                        self.emit_string_const("")
+                    } else {
+                        self.emit_call_arg(&ne.arguments[0])
+                    };
+                    let flags = if ne.arguments.len() >= 2 {
+                        self.emit_call_arg(&ne.arguments[1])
+                    } else {
+                        format!("{}", JS_UNDEF)
+                    };
+                    let r = self.fresh_reg();
+                    self.emit(&format!(
+                        "  {} = call i64 @js_regexp_new(i64 {}, i64 {})",
+                        r, pattern, flags
+                    ));
+                    return r;
                 }
                 "Promise" => {
                     let executor = if ne.arguments.is_empty() {
@@ -535,10 +861,14 @@ impl CodeGen {
                     "Infinity" => return format!("{}", js_number_bits(f64::INFINITY)),
                     _ => {}
                 }
-                let alloca = self.lookup_var(id.name.as_str()).to_string();
-                let reg = self.fresh_reg();
-                self.emit(&format!("  {} = load i64, ptr {}, align 8", reg, alloca));
-                reg
+                if let Some(alloca) = self.try_lookup_var(id.name.as_str()) {
+                    let alloca = alloca.to_string();
+                    let reg = self.fresh_reg();
+                    self.emit(&format!("  {} = load i64, ptr {}, align 8", reg, alloca));
+                    reg
+                } else {
+                    format!("{}", JS_UNDEF)
+                }
             }
             Argument::BinaryExpression(be) => self.emit_binary(be),
             Argument::UnaryExpression(ue) => self.emit_unary(ue),

@@ -12,13 +12,42 @@ JSValue js_func_new(JSNativeFunc fn, void* closure_env, int arity) {
     return (JSValue)(FUNC_TAG | ((uint64_t)f & PTR_MASK));
 }
 
+JSValue js_call_func_spread(JSValue func_val, JSValue arr_val) {
+    if (!js_is_function(func_val)) {
+        char* s = js_to_cstring(func_val);
+        fprintf(stderr, "TypeError: %s is not a function (spread call)\n", s);
+        free(s);
+        exit(1);
+    }
+    JSFunction* fn = (JSFunction*)js_as_ptr(func_val);
+    if (!js_is_array(arr_val)) {
+        return fn->fn(NULL, 0, fn->closure_env);
+    }
+    JSArray* arr = (JSArray*)js_as_ptr(arr_val);
+    return fn->fn(arr->data, arr->length, fn->closure_env);
+}
+
 JSValue js_call_func(JSValue func_val, JSValue* args, int argc) {
     if (!js_is_function(func_val)) {
-        fprintf(stderr, "TypeError: not a function\n");
+        char* s = js_to_cstring(func_val);
+        fprintf(stderr, "TypeError: %s is not a function\n", s);
+        free(s);
         exit(1);
     }
     JSFunction* fn = (JSFunction*)js_as_ptr(func_val);
     return fn->fn(args, argc, fn->closure_env);
+}
+
+// Trampoline for Function.prototype.bind
+JSValue js_bind_trampoline(JSValue* args, int argc, void* closure) {
+    JSValue* env = (JSValue*)closure;
+    JSValue orig_fn = env[0];
+    JSValue bind_this = env[1];
+    JSFunction* fn = (JSFunction*)js_as_ptr(orig_fn);
+    js_this_push(bind_this);
+    JSValue result = fn->fn(args, argc, fn->closure_env);
+    js_this_pop();
+    return result;
 }
 
 // ============================================================

@@ -1,4 +1,5 @@
 mod calls;
+mod classes;
 mod expressions;
 mod functions;
 mod literals;
@@ -41,17 +42,21 @@ pub struct CodeGen {
     pub(crate) scopes: Vec<HashMap<String, String>>,
     pub(crate) var_counter: u32,
     pub(crate) string_constants: Vec<(String, String, usize)>, // (global_name, escaped, byte_len)
-    pub(crate) known_functions: HashMap<String, String>,        // js_name -> llvm_name
+    pub(crate) known_functions: HashMap<String, String>,       // js_name -> llvm_name
     pub(crate) block_terminated: bool,
     pub(crate) current_block: String,
     pub(crate) is_main: bool,
     pub(crate) loop_stack: Vec<(String, String)>, // (break_label, continue_label)
     pub(crate) is_async: bool,
+    // Classes
+    pub(crate) class_info: HashMap<String, classes::ClassInfo>,
+    pub(crate) var_class_map: HashMap<String, String>, // var_name -> class_info key
     // Module system
-    pub(crate) modules: Vec<ModuleInfo>,                        // registered modules
-    pub(crate) module_map: HashMap<String, usize>,              // path -> module id
-    pub(crate) current_module_id: Option<usize>,                // current module being compiled
-    pub(crate) module_globals: Vec<String>,                     // LLVM globals for modules
+    pub(crate) modules: Vec<ModuleInfo>, // registered modules
+    pub(crate) module_map: HashMap<String, usize>, // path -> module id
+    pub(crate) current_module_id: Option<usize>, // current module being compiled
+    pub(crate) module_globals: Vec<String>, // LLVM globals for modules
+    pub(crate) module_class_exports: HashMap<usize, HashMap<String, String>>, // mod_id -> {export_name -> class_key}
 }
 
 impl CodeGen {
@@ -72,10 +77,13 @@ impl CodeGen {
             is_main: false,
             loop_stack: Vec::new(),
             is_async: false,
+            class_info: HashMap::new(),
+            var_class_map: HashMap::new(),
             modules: Vec::new(),
             module_map: HashMap::new(),
             current_module_id: None,
             module_globals: Vec::new(),
+            module_class_exports: HashMap::new(),
         }
     }
 
@@ -92,17 +100,16 @@ impl CodeGen {
 
         // Register modules
         for (i, (path, _)) in modules.iter().enumerate() {
-            cg.modules.push(ModuleInfo { id: i, path: path.clone() });
+            cg.modules.push(ModuleInfo {
+                id: i,
+                path: path.clone(),
+            });
             cg.module_map.insert(path.clone(), i);
             // Emit module globals
-            cg.module_globals.push(format!(
-                "@__mod_{}_exports = global i64 0",
-                i
-            ));
-            cg.module_globals.push(format!(
-                "@__mod_{}_initialized = global i32 0",
-                i
-            ));
+            cg.module_globals
+                .push(format!("@__mod_{}_exports = global i64 0", i));
+            cg.module_globals
+                .push(format!("@__mod_{}_initialized = global i32 0", i));
         }
 
         // Compile each module as an init function
@@ -161,10 +168,7 @@ impl CodeGen {
         self.emit_cond_br(&done, &done_label, &init_label);
 
         self.emit_label(&init_label);
-        self.emit(&format!(
-            "  store i32 1, ptr @__mod_{}_initialized",
-            mod_id
-        ));
+        self.emit(&format!("  store i32 1, ptr @__mod_{}_initialized", mod_id));
 
         // Create exports object
         let exports = self.fresh_reg();
@@ -265,13 +269,23 @@ impl CodeGen {
         mangled
     }
 
-    pub(crate) fn lookup_var(&self, name: &str) -> &str {
+    pub(crate) fn lookup_var(&mut self, name: &str) -> String {
         for scope in self.scopes.iter().rev() {
             if let Some(reg) = scope.get(name) {
-                return reg;
+                return reg.clone();
             }
         }
-        panic!("undefined variable: {}", name);
+        // Auto-declare as undefined (implicit global / hoisted var)
+        self.declare_var(name)
+    }
+
+    pub(crate) fn try_lookup_var(&self, name: &str) -> Option<&str> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(reg) = scope.get(name) {
+                return Some(reg);
+            }
+        }
+        None
     }
 
     pub(crate) fn intern_string(&mut self, s: &str) -> String {
@@ -287,11 +301,26 @@ impl CodeGen {
         let mut byte_len = 0usize;
         for c in s.chars() {
             match c {
-                '\n' => { escaped.push_str("\\0A"); byte_len += 1; }
-                '\r' => { escaped.push_str("\\0D"); byte_len += 1; }
-                '\t' => { escaped.push_str("\\09"); byte_len += 1; }
-                '\\' => { escaped.push_str("\\5C"); byte_len += 1; }
-                '"' => { escaped.push_str("\\22"); byte_len += 1; }
+                '\n' => {
+                    escaped.push_str("\\0A");
+                    byte_len += 1;
+                }
+                '\r' => {
+                    escaped.push_str("\\0D");
+                    byte_len += 1;
+                }
+                '\t' => {
+                    escaped.push_str("\\09");
+                    byte_len += 1;
+                }
+                '\\' => {
+                    escaped.push_str("\\5C");
+                    byte_len += 1;
+                }
+                '"' => {
+                    escaped.push_str("\\22");
+                    byte_len += 1;
+                }
                 c if c.is_ascii() && !c.is_ascii_control() => {
                     escaped.push(c);
                     byte_len += 1;
@@ -331,10 +360,7 @@ impl CodeGen {
             reg_i32, val
         ));
         let reg_i1 = self.fresh_reg();
-        self.emit(&format!(
-            "  {} = trunc i32 {} to i1",
-            reg_i1, reg_i32
-        ));
+        self.emit(&format!("  {} = trunc i32 {} to i1", reg_i1, reg_i32));
         reg_i1
     }
 
@@ -401,6 +427,7 @@ impl CodeGen {
             "declare i64 @js_to_number_val(i64)",
             "declare i64 @js_func_new(ptr, ptr, i32)",
             "declare i64 @js_call_func(i64, ptr, i32)",
+            "declare i64 @js_call_func_spread(i64, i64)",
             "declare void @js_throw(i64)",
             "declare i64 @js_prompt(i64)",
             "declare i64 @js_parse_int(i64, i64)",
@@ -447,6 +474,8 @@ impl CodeGen {
             "declare void @js_array_concat_into(i64, i64)",
             "declare void @js_object_spread(i64, i64)",
             // this binding
+            "declare void @js_this_push(i64)",
+            "declare void @js_this_pop()",
             "declare i64 @js_this_get()",
             // bitwise operators
             "declare i64 @js_bitand(i64, i64)",
@@ -474,6 +503,23 @@ impl CodeGen {
             "declare i64 @js_array_from(i64)",
             // fetch
             "declare i64 @js_fetch(i64, i64)",
+            // web APIs
+            "declare i64 @js_headers_new(i64)",
+            "declare i64 @js_request_new(i64, i64)",
+            "declare i64 @js_response_new(i64, i64)",
+            "declare i64 @js_url_new_val(i64)",
+            "declare i64 @js_response_json(i64, i64)",
+            "declare i64 @js_response_redirect(i64, i64)",
+            // object rest destructuring
+            "declare i64 @js_object_rest(i64, i64)",
+            // Object.fromEntries
+            "declare i64 @js_object_from_entries(i64)",
+            // server
+            "declare i64 @js_serve(i64)",
+            // map / set / regexp
+            "declare i64 @js_map_new()",
+            "declare i64 @js_set_new()",
+            "declare i64 @js_regexp_new(i64, i64)",
             // promises
             "declare i64 @js_promise_create(i64)",
             "declare i64 @js_promise_resolve_static(i64)",

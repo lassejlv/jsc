@@ -88,9 +88,20 @@ JSValue js_in(JSValue key, JSValue obj) {
 }
 
 JSValue js_instanceof(JSValue val, JSValue ctor) {
-    // Simplified: check if val is an object with matching constructor name
-    (void)val; (void)ctor;
-    return JS_FALSE; // placeholder — full prototype chain needed for proper support
+    if (!js_is_object(val)) return JS_FALSE;
+    JSObject* obj = (JSObject*)js_as_ptr(val);
+    JSValue obj_type = js_object_get(obj, "__type");
+    if (!js_is_string(obj_type)) return JS_FALSE;
+
+    // If ctor is a class object with __className, compare
+    if (js_is_object(ctor)) {
+        JSValue ctor_name = js_object_get((JSObject*)js_as_ptr(ctor), "__className");
+        if (js_is_string(ctor_name)) {
+            return strcmp(js_as_string(obj_type)->data, js_as_string(ctor_name)->data) == 0
+                ? JS_TRUE : JS_FALSE;
+        }
+    }
+    return JS_FALSE;
 }
 
 JSValue js_delete_prop(JSValue obj_val, JSValue key_val) {

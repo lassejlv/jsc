@@ -1,8 +1,8 @@
 # Roadmap: Toward a Working JS Compiler
 
-Current state: compiles JavaScript to native executables via LLVM IR. Phases 1–9 are complete. Comprehensive language support including: NaN-boxed dynamic types, strings (27+ methods), objects, arrays (25+ methods), closures, `this` binding, try/catch/finally, destructuring, spread, JSON.parse/stringify, all synchronous builtins, switch/do-while/for-in, break/continue, compound assignments, bitwise operators, optional chaining (`?.`), nullish coalescing (`??`), Promises, async/await, setTimeout/setInterval, event loop, and fetch() with full HTTP support. Cross-platform (macOS, Linux, Windows).
+Current state: compiles JavaScript/TypeScript to native executables via LLVM IR. Phases 1–10.5 are complete. Comprehensive language support including: NaN-boxed dynamic types, strings (27+ methods), objects, arrays (25+ methods), closures, `this` binding, try/catch/finally, destructuring, spread, JSON.parse/stringify, all synchronous builtins, switch/do-while/for-in, break/continue, compound assignments, bitwise operators, optional chaining (`?.`), nullish coalescing (`??`), Promises, async/await, setTimeout/setInterval, event loop, and fetch() with full HTTP support. Cross-platform (macOS, Linux, Windows).
 
-Remaining work: classes and polish.
+Remaining work: Hono integration testing and polish.
 
 ---
 
@@ -116,13 +116,27 @@ Remaining work: classes and polish.
 - [x] **Transitive imports** — Module A imports B which imports C — all resolved and compiled
 - [ ] **Standard library modules** — Bundle built-in modules (e.g. `fs`, `path`)
 
-## Phase 10: Classes
+## Phase 10: Classes ✅
 
-- [ ] **Class declarations** — `class Foo { constructor() {} }`
-- [ ] **Methods** — Instance methods on prototype
-- [ ] **`extends` / `super`** — Inheritance
-- [ ] **Static methods** — `static foo() {}`
-- [ ] **Getters / setters** — `get prop()`, `set prop(v)`
+- [x] **Class declarations** — `class Foo { constructor() {} }`, class expressions
+- [x] **Methods** — Instance methods stamped onto each object, correct `this` binding
+- [x] **`extends`** — Inheritance via super class instantiation + property copy
+- [x] **Static methods** — `static foo() {}` attached to the class constructor object
+- [x] **Getters / setters** — `get prop()`, `set prop(v)` via `__getters`/`__setters` with runtime intercept in `js_get_prop`
+- [x] **`instanceof`** — Works via `__type` property comparison
+- [x] **Method chaining** — `return this` works correctly
+
+## Phase 10.5: Web Server & APIs ✅
+
+- [x] **`JSC.serve()`** — HTTP server via POSIX sockets, single-threaded accept loop
+- [x] **`new Request(url, init)`** — Full Web standard Request with method, url, headers, body, pathname
+- [x] **`new Response(body, init)`** — Full Web standard Response with status, headers, text(), json()
+- [x] **`Response.json(data)`** — Static method for JSON responses with auto Content-Type
+- [x] **`Response.redirect(url, status)`** — Static method for redirects
+- [x] **`new Headers(init)`** — Full Headers API: get, set, has, delete, forEach, entries, keys, values
+- [x] **`new URL(url)`** — URL parsing: protocol, host, hostname, port, pathname, search, hash, origin
+- [x] **node_modules resolution** — Bare specifier resolution, package.json exports/module/main, scoped packages, sub-path imports
+- [x] **Request/Response integration** — HTTP parser creates Request, Response serializer writes to socket
 
 ## Phase 11: Polish and Compatibility
 
@@ -138,7 +152,7 @@ Remaining work: classes and polish.
 ## What's left
 
 The big remaining items are:
-1. **Classes** (Phase 10) — Very common in modern JS, needed for most frameworks
+1. **Hono integration** — Full testing with the Hono web framework from node_modules
 2. **Test suite / benchmarks** (Phase 11) — Automated testing and performance comparison
 
 ## Architecture note: the runtime library

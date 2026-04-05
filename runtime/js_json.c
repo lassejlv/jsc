@@ -99,6 +99,24 @@ JSValue js_array_is_array(JSValue v) {
     return js_is_array(v) ? JS_TRUE : JS_FALSE;
 }
 
+// Object.fromEntries
+JSValue js_object_from_entries(JSValue entries) {
+    JSValue obj = js_object_new();
+    if (!js_is_array(entries)) return obj;
+    JSArray* arr = (JSArray*)js_as_ptr(entries);
+    for (int i = 0; i < arr->length; i++) {
+        if (js_is_array(arr->data[i])) {
+            JSArray* pair = (JSArray*)js_as_ptr(arr->data[i]);
+            if (pair->length >= 2) {
+                char* key = js_to_cstring(pair->data[0]);
+                js_object_set((JSObject*)js_as_ptr(obj), key, pair->data[1]);
+                free(key);
+            }
+        }
+    }
+    return obj;
+}
+
 // ============================================================
 // JSON.parse
 // ============================================================

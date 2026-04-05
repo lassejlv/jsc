@@ -1,3 +1,8 @@
 // @ts-nocheck
-const response = await fetch("https://kontentspace.com/api/status");
-console.log(typeof response.status);
+import { Hono } from "hono";
+
+const app = new Hono();
+
+app.get("/", (c) => c.text("Hey!"));
+
+JSC.serve({ port: 3000, fetch: app.fetch });

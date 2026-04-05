@@ -2,6 +2,8 @@
 
 A JavaScript-to-native compiler written in Rust. Compiles JavaScript to machine code via LLVM, producing standalone executables.
 
+CLAUDE AND CODEX MADE ALL OF THIS, THIS PROJECT IS FOR FUN. USE IT WITH CAUTION AND AT YOUR OWN RISK!!!
+
 ## How it works
 
 ```

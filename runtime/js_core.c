@@ -251,10 +251,18 @@ JSValue js_gte(JSValue a, JSValue b) {
 // Console I/O
 // ============================================================
 
+static char* js_format_for_log(JSValue v) {
+    if (js_is_object(v) || js_is_array(v)) {
+        JSValue json = js_json_stringify(v);
+        return js_to_cstring(json);
+    }
+    return js_to_cstring(v);
+}
+
 void js_console_log(JSValue* args, int argc) {
     for (int i = 0; i < argc; i++) {
         if (i > 0) printf(" ");
-        char* s = js_to_cstring(args[i]);
+        char* s = js_format_for_log(args[i]);
         printf("%s", s);
         free(s);
     }
@@ -265,7 +273,7 @@ void js_console_log(JSValue* args, int argc) {
 void js_console_error(JSValue* args, int argc) {
     for (int i = 0; i < argc; i++) {
         if (i > 0) fprintf(stderr, " ");
-        char* s = js_to_cstring(args[i]);
+        char* s = js_format_for_log(args[i]);
         fprintf(stderr, "%s", s);
         free(s);
     }
@@ -280,7 +288,21 @@ void js_console_error(JSValue* args, int argc) {
 JSValue js_get_prop(JSValue obj, JSValue key) {
     if (js_is_object(obj)) {
         char* ks = js_to_cstring(key);
-        JSValue r = js_object_get((JSObject*)js_as_ptr(obj), ks);
+        JSObject* o = (JSObject*)js_as_ptr(obj);
+        JSValue r = js_object_get(o, ks);
+        if (js_is_undefined(r)) {
+            // Check getters
+            JSValue getters = js_object_get(o, "__getters");
+            if (js_is_object(getters)) {
+                JSValue getter_fn = js_object_get((JSObject*)js_as_ptr(getters), ks);
+                if (js_is_function(getter_fn)) {
+                    JSFunction* fn = (JSFunction*)js_as_ptr(getter_fn);
+                    js_this_push(obj);
+                    r = fn->fn(NULL, 0, fn->closure_env);
+                    js_this_pop();
+                }
+            }
+        }
         free(ks);
         return r;
     }

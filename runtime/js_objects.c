@@ -61,6 +61,35 @@ JSValue js_object_get(JSObject* obj, const char* key) {
     return JS_UNDEFINED;
 }
 
+// Object rest: copy all properties except excluded keys
+// exclude_keys is an array of string JSValues
+JSValue js_object_rest(JSValue src, JSValue exclude_keys) {
+    JSValue result = js_object_new();
+    if (!js_is_object(src)) return result;
+    JSObject* obj = (JSObject*)js_as_ptr(src);
+    JSArray* excl = js_is_array(exclude_keys) ? (JSArray*)js_as_ptr(exclude_keys) : NULL;
+    for (int i = 0; i < obj->capacity; i++) {
+        if (obj->entries[i].occupied != 1) continue;
+        const char* key = obj->entries[i].key;
+        // Check if key is in exclusion list
+        int excluded = 0;
+        if (excl) {
+            for (int j = 0; j < excl->length; j++) {
+                if (js_is_string(excl->data[j])) {
+                    if (strcmp(js_as_string(excl->data[j])->data, key) == 0) {
+                        excluded = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!excluded) {
+            js_object_set((JSObject*)js_as_ptr(result), key, obj->entries[i].value);
+        }
+    }
+    return result;
+}
+
 // ============================================================
 // Array operations
 // ============================================================

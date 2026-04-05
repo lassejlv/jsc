@@ -23,6 +23,7 @@
 #endif
 
 #include <curl/curl.h>
+#include <regex.h>
 
 // ============================================================
 // NaN-boxing value representation
@@ -38,6 +39,7 @@ JSValue js_array_sort(JSValue arr_val, JSValue compare_fn);
 JSValue js_array_splice(JSValue arr_val, JSValue* args, int argc);
 JSValue js_json_parse(JSValue str);
 JSValue js_fetch(JSValue url_val, JSValue options_val);
+JSValue js_call_func_spread(JSValue func_val, JSValue arr_val);
 // Promise
 JSValue js_promise_create(JSValue executor);
 JSValue js_promise_resolve_static(JSValue value);
@@ -54,6 +56,29 @@ JSValue js_set_timeout(JSValue callback, JSValue delay_val);
 JSValue js_set_interval(JSValue callback, JSValue delay_val);
 JSValue js_clear_timeout(JSValue id_val);
 void js_run_event_loop(void);
+// Web APIs
+JSValue js_headers_new(JSValue init);
+JSValue js_url_new(const char* url_str);
+JSValue js_request_new(JSValue url_val, JSValue init_val);
+JSValue js_response_new(JSValue body_val, JSValue init_val);
+JSValue js_response_json(JSValue data, JSValue init_val);
+JSValue js_response_redirect(JSValue url_val, JSValue status_val);
+JSValue js_url_new_val(JSValue url_val);
+// Server
+JSValue js_serve(JSValue config);
+// Map / Set / RegExp
+JSValue js_map_new(void);
+JSValue js_map_set(JSValue map_val, JSValue key, JSValue value);
+JSValue js_map_get(JSValue map_val, JSValue key);
+JSValue js_map_has(JSValue map_val, JSValue key);
+JSValue js_map_delete(JSValue map_val, JSValue key);
+JSValue js_set_new(void);
+JSValue js_regexp_new(JSValue pattern_val, JSValue flags_val);
+JSValue js_regexp_test(JSValue re_val, JSValue str_val);
+JSValue js_regexp_exec(JSValue re_val, JSValue str_val);
+typedef struct { JSValue* keys; JSValue* values; int length; int capacity; } JSMapData;
+JSMapData* map_get_data(JSValue map_val);
+int map_find_key(JSMapData* data, JSValue key);
 
 #define QNAN        ((uint64_t)0x7FFC000000000000ULL)
 #define SIGN_BIT    ((uint64_t)0x8000000000000000ULL)
@@ -141,4 +166,9 @@ JSValue js_to_string_val(JSValue v);
 int js_is_truthy(JSValue v);
 double js_to_number(JSValue v);
 void js_release(JSValue v);
+JSValue js_json_stringify(JSValue v);
+JSValue js_object_rest(JSValue src, JSValue exclude_keys);
+JSValue js_bind_trampoline(JSValue* args, int argc, void* closure);
+void* js_alloc_closure_env(int size);
+JSValue js_func_new(JSNativeFunc fn, void* closure_env, int arity);
 

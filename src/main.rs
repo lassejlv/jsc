@@ -18,8 +18,11 @@ const RUNTIME_SRC: &str = concat!(
     include_str!("../runtime/js_builtins.c"),
     include_str!("../runtime/js_json.c"),
     include_str!("../runtime/js_operators.c"),
+    include_str!("../runtime/js_map_regex.c"),
     include_str!("../runtime/js_fetch.c"),
     include_str!("../runtime/js_promise.c"),
+    include_str!("../runtime/js_web.c"),
+    include_str!("../runtime/js_server.c"),
     include_str!("../runtime/js_init.c"),
 );
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -43,14 +46,15 @@ fn print_help() {
 
 {BOLD}OPTIONS{RESET}
   {CYAN}-o <file>{RESET}      Output file path {DIM}(default: <input> without .js){RESET}
+  {CYAN}--run{RESET}          Compile and run immediately
   {CYAN}--emit-ir{RESET}      Keep the generated LLVM IR (.ll) file
   {CYAN}--help{RESET}         Show this help message
   {CYAN}--version{RESET}      Print version
 
 {BOLD}EXAMPLES{RESET}
-  {DIM}${RESET} js-compiler app.js
-  {DIM}${RESET} js-compiler app.js -o myapp
-  {DIM}${RESET} js-compiler app.js --emit-ir
+  {DIM}${RESET} jsc app.ts
+  {DIM}${RESET} jsc --run server.ts
+  {DIM}${RESET} jsc app.js -o myapp
 "#
     );
 }
@@ -76,6 +80,158 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+/// Resolve a module specifier to a file path
+fn resolve_module(spec: &str, from_dir: &str) -> Option<String> {
+    // Relative imports
+    if spec.starts_with('.') || spec.starts_with('/') {
+        let base = Path::new(from_dir).join(spec).to_string_lossy().to_string();
+        return resolve_file_path(&base);
+    }
+
+    // Bare specifier — node_modules resolution
+    let (pkg_name, subpath) = if spec.starts_with('@') {
+        // Scoped package: @scope/pkg or @scope/pkg/sub
+        let parts: Vec<&str> = spec.splitn(3, '/').collect();
+        if parts.len() >= 2 {
+            let name = format!("{}/{}", parts[0], parts[1]);
+            let sub = if parts.len() > 2 { Some(format!("./{}", parts[2])) } else { None };
+            (name, sub)
+        } else {
+            return None;
+        }
+    } else {
+        // Regular: pkg or pkg/sub
+        let parts: Vec<&str> = spec.splitn(2, '/').collect();
+        let name = parts[0].to_string();
+        let sub = if parts.len() > 1 { Some(format!("./{}", parts[1])) } else { None };
+        (name, sub)
+    };
+
+    // Walk up directories looking for node_modules
+    let mut dir = Path::new(from_dir).to_path_buf();
+    loop {
+        let pkg_dir = dir.join("node_modules").join(&pkg_name);
+        if pkg_dir.exists() {
+            return resolve_package(&pkg_dir, subpath.as_deref());
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
+/// Try to resolve a file path with extension fallbacks
+fn resolve_file_path(base: &str) -> Option<String> {
+    if Path::new(base).exists() && Path::new(base).is_file() {
+        return Some(base.to_string());
+    }
+    for ext in &[".ts", ".js", ".tsx", ".jsx"] {
+        let with_ext = format!("{}{}", base, ext);
+        if Path::new(&with_ext).exists() {
+            return Some(with_ext);
+        }
+    }
+    // Try as directory with index file
+    for name in &["index.ts", "index.js", "index.tsx"] {
+        let index = Path::new(base).join(name).to_string_lossy().to_string();
+        if Path::new(&index).exists() {
+            return Some(index);
+        }
+    }
+    None
+}
+
+/// Resolve a package entry point from its directory
+fn resolve_package(pkg_dir: &Path, subpath: Option<&str>) -> Option<String> {
+    let pkg_json_path = pkg_dir.join("package.json");
+    if let Ok(contents) = fs::read_to_string(&pkg_json_path) {
+        let lookup = subpath.unwrap_or(".");
+
+        // Try exports field (simplified JSON parsing)
+        if let Some(entry) = parse_exports_entry(&contents, lookup) {
+            let resolved = pkg_dir.join(&entry).to_string_lossy().to_string();
+            if Path::new(&resolved).exists() {
+                return Some(resolved);
+            }
+        }
+
+        // Fallback: "module" field
+        if let Some(entry) = parse_json_string_field(&contents, "module") {
+            let resolved = pkg_dir.join(&entry).to_string_lossy().to_string();
+            if Path::new(&resolved).exists() {
+                return Some(resolved);
+            }
+        }
+
+        // Fallback: "main" field
+        if let Some(entry) = parse_json_string_field(&contents, "main") {
+            let resolved = pkg_dir.join(&entry).to_string_lossy().to_string();
+            if Path::new(&resolved).exists() {
+                return Some(resolved);
+            }
+        }
+    }
+
+    // Fallback: index.js
+    let index = pkg_dir.join("index.js").to_string_lossy().to_string();
+    if Path::new(&index).exists() {
+        return Some(index);
+    }
+    None
+}
+
+/// Parse the "exports" field from package.json to find an entry point
+fn parse_exports_entry(json: &str, lookup: &str) -> Option<String> {
+    // Find "exports" in the JSON
+    let exports_idx = json.find("\"exports\"")?;
+    let after = &json[exports_idx..];
+
+    // Find the lookup key (e.g., "." or "./context")
+    let key_str = format!("\"{}\"", lookup);
+    let key_idx = after.find(&key_str)?;
+    let after_key = &after[key_idx..];
+
+    // Look for "import" condition
+    if let Some(import_idx) = after_key.find("\"import\"") {
+        let after_import = &after_key[import_idx..];
+        // Could be a string directly or an object with "default"
+        // Try "default" first (nested)
+        if let Some(default_idx) = after_import.find("\"default\"") {
+            let after_default = &after_import[default_idx..];
+            return extract_next_string_value(after_default);
+        }
+        // Direct string value after "import":
+        return extract_next_string_value(after_import);
+    }
+
+    // Try "default" directly
+    if let Some(default_idx) = after_key.find("\"default\"") {
+        let after_default = &after_key[default_idx..];
+        return extract_next_string_value(after_default);
+    }
+
+    None
+}
+
+/// Parse a simple top-level string field from JSON
+fn parse_json_string_field(json: &str, field: &str) -> Option<String> {
+    let pattern = format!("\"{}\"", field);
+    let idx = json.find(&pattern)?;
+    let after = &json[idx..];
+    extract_next_string_value(after)
+}
+
+/// Extract the next quoted string value after a colon
+fn extract_next_string_value(s: &str) -> Option<String> {
+    let colon = s.find(':')?;
+    let after_colon = &s[colon + 1..];
+    let quote_start = after_colon.find('"')?;
+    let after_quote = &after_colon[quote_start + 1..];
+    let quote_end = after_quote.find('"')?;
+    Some(after_quote[..quote_end].to_string())
 }
 
 fn source_type_for(path: &str) -> SourceType {
@@ -111,7 +267,12 @@ fn main() {
         std::process::exit(0);
     }
 
-    let input_path = &args[1];
+    // Support `jsc run app.ts` and `jsc --run app.ts`
+    let input_path = if (args[1] == "run" || args[1] == "--run") && args.len() >= 3 {
+        &args[2]
+    } else {
+        &args[1]
+    };
     let output_path = if args.len() >= 4 && args[2] == "-o" {
         args[3].clone()
     } else {
@@ -128,6 +289,7 @@ fn main() {
         }
     };
     let keep_ir = args.iter().any(|a| a == "--emit-ir");
+    let run_after = args.iter().any(|a| a == "--run") || args[1] == "run";
 
     let input_name = Path::new(input_path)
         .file_name()
@@ -195,22 +357,11 @@ fn main() {
 
     while let Some((spec, from_dir)) = queue.pop_front() {
         // Resolve path
-        let mut resolved = Path::new(&from_dir).join(&spec).to_string_lossy().to_string();
-        if !Path::new(&resolved).exists() {
-            // Try common extensions
-            let candidates = [
-                format!("{}.ts", resolved),
-                format!("{}.js", resolved),
-                format!("{}.tsx", resolved),
-                format!("{}.jsx", resolved),
-            ];
-            for candidate in &candidates {
-                if Path::new(candidate).exists() {
-                    resolved = candidate.clone();
-                    break;
-                }
-            }
-        }
+        let resolved = resolve_module(&spec, &from_dir);
+        let resolved = match resolved {
+            Some(r) => r,
+            None => continue, // Unresolvable module, skip
+        };
 
         // Canonicalize for dedup
         let canonical = fs::canonicalize(&resolved)
@@ -378,4 +529,18 @@ fn main() {
         eprintln!("  {DIM}IR saved to {ir_name}{RESET}");
     }
     eprintln!();
+
+    // --run: execute the compiled binary
+    if run_after {
+        let abs_output = fs::canonicalize(&output_path)
+            .unwrap_or_else(|_| Path::new(&output_path).to_path_buf());
+        let status = Command::new(&abs_output)
+            .status()
+            .unwrap_or_else(|e| {
+                fail(&format!("Cannot run {}: {e}", output_path));
+            });
+        // Clean up the binary after run
+        let _ = fs::remove_file(&output_path);
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }

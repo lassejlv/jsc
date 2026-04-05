@@ -6,7 +6,12 @@ use super::{CodeGen, JS_UNDEF};
 
 impl CodeGen {
     pub(crate) fn emit_function_decl(&mut self, func: &Function<'_>) {
-        let js_name = func.id.as_ref().expect("function must have name").name.as_str();
+        let js_name = func
+            .id
+            .as_ref()
+            .expect("function must have name")
+            .name
+            .as_str();
         let llvm_name = format!("__jsfn_{}", js_name);
         self.known_functions
             .insert(js_name.to_string(), llvm_name.clone());
@@ -174,10 +179,7 @@ impl CodeGen {
                 "  {} = load i64, ptr {}, align 8",
                 val_reg, ptr_reg
             ));
-            self.emit(&format!(
-                "  store i64 {}, ptr {}, align 8",
-                val_reg, alloca
-            ));
+            self.emit(&format!("  store i64 {}, ptr {}, align 8", val_reg, alloca));
         }
 
         // Unpack args into local variables (after captures, so params override)
@@ -195,15 +197,69 @@ impl CodeGen {
             match &param.pattern {
                 BindingPattern::BindingIdentifier(id) => {
                     let alloca = self.declare_var(id.name.as_str());
-                    self.emit(&format!(
-                        "  store i64 {}, ptr {}, align 8",
-                        val_reg, alloca
-                    ));
+                    self.emit(&format!("  store i64 {}, ptr {}, align 8", val_reg, alloca));
                 }
                 pattern => {
                     self.emit_binding_pattern(pattern, &val_reg);
                 }
             }
+        }
+
+        // Rest parameter: collect remaining args into an array
+        if let Some(rest) = &params.rest {
+            let named_count = params.items.len();
+            let rest_arr = self.fresh_reg();
+            self.emit(&format!("  {} = call i64 @js_array_new()", rest_arr));
+
+            // Loop from named_count to argc
+            let idx_alloca = {
+                let m = format!("%rest.idx.{}", self.var_counter);
+                self.var_counter += 1;
+                self.emit(&format!("  {} = alloca i32, align 4", m));
+                self.emit(&format!("  store i32 {}, ptr {}, align 4", named_count, m));
+                m
+            };
+
+            let cond_l = self.fresh_label("rest.cond");
+            let body_l = self.fresh_label("rest.body");
+            let end_l = self.fresh_label("rest.end");
+
+            self.emit_br(&cond_l);
+            self.emit_label(&cond_l);
+            let idx = self.fresh_reg();
+            self.emit(&format!(
+                "  {} = load i32, ptr {}, align 4",
+                idx, idx_alloca
+            ));
+            let cmp = self.fresh_reg();
+            self.emit(&format!("  {} = icmp slt i32 {}, %argc", cmp, idx));
+            self.emit_cond_br(&cmp, &body_l, &end_l);
+
+            self.emit_label(&body_l);
+            let elem_ptr = self.fresh_reg();
+            self.emit(&format!(
+                "  {} = getelementptr i64, ptr %args, i32 {}",
+                elem_ptr, idx
+            ));
+            let elem_val = self.fresh_reg();
+            self.emit(&format!(
+                "  {} = load i64, ptr {}, align 8",
+                elem_val, elem_ptr
+            ));
+            self.emit(&format!(
+                "  call i64 @js_array_push_val(i64 {}, i64 {})",
+                rest_arr, elem_val
+            ));
+            let next_idx = self.fresh_reg();
+            self.emit(&format!("  {} = add i32 {}, 1", next_idx, idx));
+            self.emit(&format!(
+                "  store i32 {}, ptr {}, align 4",
+                next_idx, idx_alloca
+            ));
+            self.emit_br(&cond_l);
+
+            self.emit_label(&end_l);
+            self.emit_binding_pattern(&rest.rest.argument, &rest_arr);
         }
 
         // Emit body
@@ -267,10 +323,7 @@ impl CodeGen {
             // Store each outer variable's current value into the env
             for (i, (_, alloca)) in outer_vars.iter().enumerate() {
                 let val = self.fresh_reg();
-                self.emit(&format!(
-                    "  {} = load i64, ptr {}, align 8",
-                    val, alloca
-                ));
+                self.emit(&format!("  {} = load i64, ptr {}, align 8", val, alloca));
                 let ptr = self.fresh_reg();
                 self.emit(&format!(
                     "  {} = getelementptr i64, ptr {}, i32 {}",
@@ -287,7 +340,10 @@ impl CodeGen {
         let result = self.fresh_reg();
         self.emit(&format!(
             "  {} = call i64 @js_func_new(ptr @{}, ptr {}, i32 {})",
-            result, fn_name, env_reg, params.items.len()
+            result,
+            fn_name,
+            env_reg,
+            params.items.len()
         ));
         result
     }
